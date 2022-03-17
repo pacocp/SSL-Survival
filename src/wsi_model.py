@@ -6,7 +6,7 @@ import argparse
 import datetime
 import numpy as np
 import torch
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tensorboardX import SummaryWriter
 from torchvision import transforms
@@ -354,3 +354,93 @@ if __name__ == "__main__":
     train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['Labels'], random_state=args.seed)
 
     train_df, val_df = train_test_split(train_df, test_size=0.2, stratify=train_df['Labels'], random_state=args.seed)
+
+    train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
+                         max_patch_per_wsi=max_patch_per_wsi,
+                         bag_size=bag_size,
+                         transforms=transforms_, quick=quick)
+    val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
+                            max_patch_per_wsi=max_patch_per_wsi,
+                            bag_size=bag_size,
+                            transforms=transforms_val, quick=quick)
+
+    test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
+                            max_patch_per_wsi=max_patch_per_wsi,
+                            bag_size=bag_size,
+                            transforms=transforms_val, quick=quick)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
+                num_workers=config['n_workers'], pin_memory=True, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
+    pin_memory=True, shuffle=False)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
+    num_workers=config['n_workers'], pin_memory=True, shuffle=False)
+
+    dataloaders = {
+            'train': train_dataloader,
+            'val': val_dataloader}
+
+    dataset_sizes = {
+            'train': len(train_dataset),
+            'val': len(val_dataset)
+            }
+
+    print('Finished loading dataset and creating dataloader')
+
+    print('Initializing models')
+
+    wsi_encoder = resnet50(pretrained=True)
+
+    layers_to_train = [wsi_encoder.fc, wsi_encoder.layer4, wsi_encoder.layer3]
+    for param in wsi_encoder.parameters():
+        param.requires_grad = False
+    for layer in layers_to_train:
+        for n, param in layer.named_parameters():
+            param.requires_grad = True
+
+    model = AggregationModel(wsi_encoder)
+
+    if args.checkpoint is not None:
+        print('Restoring from checkpoint')
+        print(args.checkpoint)
+        model.load_state_dict(torch.load(args.checkpoint))
+        print('Loaded model from checkpoint')
+
+
+    #model = model.cuda(config['device'])
+    model = nn.DataParallel(model)
+    model.cuda()
+
+    # add optimizer
+
+    lr = config.get('lr', 3e-3)
+
+    optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+
+    # add loss function
+    # loss function in this shit
+    criterion = nn.CrossEntropyLoss()
+
+    # train model
+
+    if args.log:
+        summary_writer = SummaryWriter(
+                os.path.join(config['summary_path'],
+                    datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
+
+        summary_writer.add_text('config', str(config))
+    else:
+        summary_writer = None
+
+    model, results = train(model, criterion, optimizer, dataloaders,
+                save_dir=config['save_dir'],
+                device=config['device'], log_interval=config['log_interval'],
+                summary_writer=summary_writer,
+                num_epochs=config['num_epochs'])
+
+    # test on test set
+
+    test_predictions = evaluate(model, test_dataloader, len(test_dataset),device=config['device'])
+
+    np.save(config['save_dir']+'test_predictions.npy', test_predictions)
+    # save results
