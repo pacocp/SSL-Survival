@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import datetime
+import pickle
 
 import numpy as np
 import torch
@@ -34,12 +35,16 @@ parser.add_argument('--parallel', type=int, default=0,
         help='Use DataParallel training')
 parser.add_argument('--fp16', type=int, default=0,
         help='Use mixed-precision training')
-parser.add_argument('--bag_size', type=int, default=50,
-                    help='Bag size to use')
 parser.add_argument('--max_patch_per_wsi', type=int, default=100,
                     help='Maximum number of paches per wsi')
 parser.add_argument('--batch_size', type=int, default=16,
                     help='Batch size')
+parser.add_argument('--lr', type=float, default=3e-3,
+                    help='Learning rate to use')
+parser.add_argument('--quick', type=int, default=0,
+        help='If a subset of samples is used for a quick training')
+parser.add_argument('--num_epochs', type=int, default=100,
+        help='Number of epochs to train the model')
 
 args = parser.parse_args()
 
@@ -67,22 +72,18 @@ patch_data_path = config['patch_data_path']
 img_size = config['img_size']
 max_patch_per_wsi = args.max_patch_per_wsi
 rna_features = config['rna_features']
-quick = config.get('quick', None)
+quick = args.quick
 batch_size = args.batch_size
-bag_size = 5
-
-if 'quick' in config:
-    quick = config['quick']
-else:
-    quick = None
 
 transforms_ = transforms.Compose([
+    transforms.ConvertImageDtype(torch.float),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomVerticalFlip(),
     transforms.ColorJitter(64.0 / 255, 0.75, 0.25, 0.04),
-    transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
 transforms_val = transforms.Compose([
-    transforms.ToTensor(),
+    transforms.ConvertImageDtype(torch.float),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
 print('Loading dataset...')
@@ -96,18 +97,15 @@ train_df, val_df = train_test_split(train_df, test_size=0.2, stratify=train_df['
 train_df, val_df, test_df, scaler = normalize_dfs(train_df, val_df, test_df)
 
 train_dataset = PatchRNADataset(patch_data_path, train_df, img_size,
-                         max_patch_per_wsi=max_patch_per_wsi,
-                         bag_size=bag_size,
+                         max_patches_total=max_patch_per_wsi,
                          transforms=transforms_, quick=quick)
 
 val_dataset = PatchRNADataset(patch_data_path, val_df, img_size,
-                         max_patch_per_wsi=max_patch_per_wsi,
-                         bag_size=bag_size,
+                         max_patches_total=max_patch_per_wsi,
                          transforms=transforms_val, quick=quick)
 
 test_dataset = PatchRNADataset(patch_data_path, test_df, img_size,
-                         max_patch_per_wsi=max_patch_per_wsi,
-                         bag_size=bag_size,
+                         max_patches_total=max_patch_per_wsi,
                          transforms=transforms_val, quick=quick)
 
 train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
@@ -140,7 +138,7 @@ for layer in layers_to_train:
         param.requires_grad = True
 
 rna_encoder = RNAEncoder(in_channels=rna_features,
-                         hidden_dims=[4096,2048])
+                         hidden_dims=[6000,2048])
 
 model = SSLModel(rna_encoder=rna_encoder,
                     wsi_encoder=wsi_encoder,
@@ -157,10 +155,9 @@ if args.checkpoint is not None:
 
 
 #model = model.cuda(config['device'])
-model = nn.DataParallel(model)
-model.cuda()
+model = model.to(config['device'])
 # add optimizer
-lr = config.get('lr', 3e-3)
+lr = args.lr
 
 optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
 
@@ -179,17 +176,17 @@ else:
     summary_writer = None
 
 model, results = train_SSL(model, criterion, optimizer, dataloaders,
-              save_dir=config['save_dir'],
+              save_dir=args.save_dir,
               device=config['device'], log_interval=config['log_interval'],
               summary_writer=summary_writer,
-              num_epochs=config['num_epochs'])
+              num_epochs=args.num_epochs)
+
+torch.save(model.wsi_encoder.state_dict(), os.path.join(args.save_dir, 'wsi_encoder.pt'))
+torch.save(model.rna_encoder.state_dict(), os.path.join(args.save_dir, 'rna_encoder.pt'))
 
 # test on test set
 
 test_predictions = evaluate_SSL(model, test_dataloader, len(test_dataset),device=config['device'])
 
-np.save(config['save_dir']+'test_predictions.npy', test_predictions)
-
-
-
-
+with open(args.save_dir+'test_predictions.pkl', 'wb') as f:
+    pickle.dump(test_predictions, f)

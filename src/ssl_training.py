@@ -53,8 +53,8 @@ def train_SSL(model, criterion, optimizer, dataloaders,
                 labels = labels.to(device)
                 
 
-                batch['image'].to(device)
-                batch['rna_data'].to(device)
+                batch['image'] = batch['image'].to(device)
+                batch['rna_data'] = batch['rna_data'].to(device)
 
                 optimizer.zero_grad()
                 with torch.set_grad_enabled(phase=='train'):
@@ -124,35 +124,30 @@ def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None):
 
     corrects = 0
     predictions = []
+    real_labels = []
     for batch in tqdm(dataloader):
-        labels = batch['label']
+        labels = batch['labels']
         labels = labels.to(device)
+        
 
-        batch['image'].to(device)
-        batch['rna_data'].to(device)
+        batch['image'] = batch['image'].to(device)
+        batch['rna_data'] = batch['rna_data'].to(device)
 
         with torch.set_grad_enabled(False):
             outputs = model(batch['rna_data'], batch['image'])
             _, preds = torch.max(outputs, 1)
         
         predictions.append(preds.detach().cpu().numpy())
+        real_labels.append(labels.detach().cpu().numpy())
         corrects += torch.sum(preds == labels)
 
     accuracy = corrects / dataset_size
     predictions = np.concatenate([predictions], axis=0, dtype=object)
-
+    real_labels = np.concatenate([real_labels], axis=0, dtype=object)
+    test_output = {
+        'predictions': predictions,
+        'real_labels': labels
+    }
     print('Accuracy of the model {}'.format(accuracy))
     
-    return predictions
-
-
-if __name__ == "__main__":
-    batch = []
-    for i in range(50):
-        dict_inside = {
-            'patch_bag': torch.rand((100, 3, 256, 256), dtype=torch.float32),
-            'rna_data': torch.rand((56200), dtype=torch.float32)
-        }
-        batch.append(dict_inside)
-    
-    batch, labels = permutate_batch(np.asarray(batch), bag=True)
+    return test_output
