@@ -4,8 +4,8 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 
-diseases = ['ESCA', 'CESC', 'CHOL', 'GBM', 'KIRP', 'OV', 'PAAD', 'PRAD', 'READ', 'UCS', 'UVM']
-
+#diseases = ['ESCA', 'CESC', 'CHOL', 'GBM', 'KIRP', 'OV', 'PAAD', 'PRAD', 'UCS', 'UVM']
+diseases = ['LUAD']
 wsi_names = []
 labels = []
 tcga_project = []
@@ -39,13 +39,12 @@ for disease in diseases:
                 column = gene_info[patient_id].values[:-1]
                 for value, key in zip(column, genes):
                     genes_dict[key].append(value)
-print(np.unique(labels))
+
 data = pd.DataFrame()
 data['wsi_file_name'] = wsi_names
-data['Labels'] = labels
 data['tcga_project'] = tcga_project
 data['survival_months'] = survival_months
 data['status'] = status
 genes_data = pd.DataFrame.from_dict(genes_dict)
 whole_data = pd.concat([data, genes_data], axis=1)
-whole_data.to_csv('pancancer_overall_survival.csv', index=False)
+whole_data.to_csv('LUAD_overall_survival.csv', index=False)

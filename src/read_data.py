@@ -16,6 +16,8 @@ import cv2
 
 from types_ import *
 
+random.seed(10)
+
 class InvalidFileException(Exception):
     pass
 
@@ -109,7 +111,8 @@ def get_data_rna_bag_wsi(csv_path, patch_path:str , limit: int, bag_size: int, q
 
 class PatchBagDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None, bag_size=40,
-            max_patches_total=300, quick=False):
+            max_patches_total=300, quick=False, label_encoder=None, ordinal=False, 
+            type='classification'):
         self.patch_data_path = patch_data_path
         self.csv_path = csv_path
         self.img_size = img_size
@@ -117,8 +120,11 @@ class PatchBagDataset(Dataset):
         self.bag_size = bag_size
         self.max_patches_total = max_patches_total
         self.quick = quick
-        self.data = {}
+        self.le = label_encoder
+        self.ordinal = ordinal
+        self.type = type
         self.index = []
+        self.data = {}
         self._preprocess()
 
     def _preprocess(self):
@@ -133,36 +139,87 @@ class PatchBagDataset(Dataset):
         for i, row in tqdm(csv_file.iterrows()):
             row = row.to_dict()
             WSI = row['wsi_file_name']
-            n_patches = sum(1 for _ in open(os.path.join(self.patch_data_path, WSI, 'loc.txt'))) - 2
-            n_patches = min(n_patches, self.max_patches_total)
-            images = [os.path.join(self.patch_data_path, WSI, WSI + '_patch_{}.jpeg'.format(i)) for i in range(n_patches)]
+            label = np.asarray(row['Labels'])
+            if self.le is not None:
+                label = self.le.transform(label.reshape(-1,1))
+                if self.type == 'regression':
+                    label = label.astype(np.float32)
+            else:
+                if self.ordinal:
+                    label = label.astype(np.int64)
+                else:
+                    label = label.astype(np.float32)
+
+            project = row['tcga_project'] 
+            if not os.path.exists(os.path.join('../'+project+self.patch_data_path, WSI)):
+                print('Not exist {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
+                continue
+            
+            #try:
+            path = os.path.join('../'+project+self.patch_data_path, WSI, WSI)
+            try:
+                lmdb_connection = lmdb.open(path,
+                                            subdir=False, readonly=True, 
+                                            lock=False, readahead=False, meminit=False)
+            except:
+                path = path + '.db'
+                try:
+                    lmdb_connection = lmdb.open(path,
+                                                subdir=False, readonly=True, 
+                                                lock=False, readahead=False, meminit=False)
+                except:
+                    continue
+            try:
+                with lmdb_connection.begin(write=False) as lmdb_txn:
+                    n_patches = lmdb_txn.stat()['entries'] - 1
+                    keys = pickle.loads(lz4framed.decompress(lmdb_txn.get(b'__keys__')))
+            except Exception as e:
+                print(e)
+                continue
+            #except:
+            #    print('Error with lmdb file {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
+            #    continue
+            n_selected = min(n_patches, self.max_patches_total)
+            n_patches= list(range(n_patches))
+            images = random.sample(n_patches, n_selected)
             self.data[WSI] = {w.lower(): row[w] for w in row.keys()}
-            self.data[WSI].update({'WSI': WSI, 'images': images, 'n_images': len(images)})
+            self.data[WSI].update({'WSI': WSI, 'images': images, 'n_images': len(images), 
+                                   'lmdb_path': path, 'keys': keys})
             for k in range(len(images) // self.bag_size):
-                self.index.append((WSI, self.bag_size * k))
+                self.index.append((WSI, self.bag_size * k, label))
 
     def shuffle(self):
         for k in self.data.keys():
             wsi_row = self.data[k]
             np.random.shuffle(wsi_row['images'])
 
+    def decompress_and_deserialize(self, lmdb_value: Any):
+        try:
+            img_name, img_arr, img_shape = pickle.loads(lz4framed.decompress(lmdb_value))
+        except:
+            return None
+        image = np.frombuffer(img_arr, dtype=np.uint8).reshape(img_shape)
+        image = np.copy(image)
+        return torch.from_numpy(image).permute(2,0,1)
+
     def __len__(self):
         return len(self.index)
 
     def __getitem__(self, idx):
-        filenames = []
-        (WSI, i) = self.index[idx]
-        filenames.append(WSI)
+        (WSI, i, label) = self.index[idx]
         imgs = []
         row = self.data[WSI]
-        for patch in row['images'][i:i + self.bag_size]:
-            #with open(patch, 'rb') as f:
-                #img = Image.open(f).convert('RGB')
-            img = read_image(patch)
-            imgs.append(img)
-        img = torch.stack(imgs, dim=0)
+        lmdb_connection = lmdb.open(row['lmdb_path'],
+                                        subdir=False, readonly=True, 
+                                        lock=False, readahead=False, meminit=False)
+        with lmdb_connection.begin(write=False) as txn:
+            for patch in row['images'][i:i + self.bag_size]:
+                lmdb_value = txn.get(row['keys'][patch])
+                img = self.decompress_and_deserialize(lmdb_value)
+                imgs.append(img)
 
-        return img, filenames
+        img = torch.stack(imgs, dim=0)
+        return img, label
 
 class PatchDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None,
@@ -312,25 +369,36 @@ class PatchRNADataset(Dataset):
                 label = self.le.transform(label.reshape(-1,1))
             label = torch.tensor(label, dtype=torch.float32)
             #label = label.flatten()
+            project = row['tcga_project'] 
+            if not os.path.exists(os.path.join('../'+project+self.patch_data_path, WSI)):
+                print('Not exist {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
+                continue
+            
+            #try:
+            path = os.path.join('../'+project+self.patch_data_path, WSI, WSI)
             try:
-                path = os.path.join(data_path, WSI, WSI.replace('.svs', '.db'))
-                if path == '../../Histology/BrainCortex_Patches256x256/GTEX-1E2YA-3025.svs/GTEX-1E2YA-3025.db': continue
                 lmdb_connection = lmdb.open(path,
                                             subdir=False, readonly=True, 
                                             lock=False, readahead=False, meminit=False)
-           
+            except:
+                path = path + '.db'
+                try:
+                    lmdb_connection = lmdb.open(path,
+                                                subdir=False, readonly=True, 
+                                                lock=False, readahead=False, meminit=False)
+                except:
+                    continue
+            try:
                 with lmdb_connection.begin(write=False) as lmdb_txn:
                     n_patches = lmdb_txn.stat()['entries'] - 1
                     keys = pickle.loads(lz4framed.decompress(lmdb_txn.get(b'__keys__')))
-                #n_patches = sum(1 for _ in open(os.path.join(data_path, WSI, 'loc.txt'))) - 2
-                n_selected = min(n_patches, self.max_patches_total)
-                n_patches= list(range(n_patches))
-                n_patches_index = random.sample(n_patches, n_selected)
-            except:
-                print('Error with db {}'.format(os.path.join(data_path, WSI, WSI.replace('.svs', '.db'))))
+            except Exception as e:
+                print(e)
                 continue
-            #self.keys.append(keys)
-            #self.random_index.append(n_patches_index)
+
+            n_selected = min(n_patches, self.max_patches_total)
+            n_patches= list(range(n_patches))
+            n_patches_index = random.sample(n_patches, n_selected)
 
             for i in n_patches_index:
                 #self.images.append(os.path.join(data_path, WSI, WSI + '_patch_{}.png'.format(i)))
@@ -408,61 +476,6 @@ def get_data_rna(csv_paths, quick=False):
             dataset.append(item)
 
     return dataset
-
-'''
-class PatchRNADataset(Dataset):
-        def __init__(self, patch_data_path, rna_csv_path, img_size, transforms=None,
-                     max_patch_per_wsi=400):
-                self._patch_data_path = patch_data_path
-                self._rna_csv_path = rna_csv_path
-                self._img_size = img_size
-                self._transforms = transforms
-                self._max_patch_per_wsi = max_patch_per_wsi
-                self.data = None
-                self._preprocess()
-        def _preprocess(self):
-                 self.data = get_data_rna_wsi(self._rna_csv_path, self._patch_data_path,
-                                              max_patches=self._max_patch_per_wsi)
-        def __len__(self): return len(self.data)
-
-        def __getitem__(self, idx):
-            item = self.data[idx].copy()
-            patch = item['patch']
-            img = Image.open(patch).convert('RGB')
-            if self._transforms is not None:
-                img = self.transforms(img)
-                item['img'] = img
-            return item
-
-         # TODO: function to permute the data, in order to not have
-         # the same image, and create labels
-
-def get_data_rna_wsi(csv_path, patch_path, max_patches=None):
-        dataset = []
-        data = pd.read_csv(csv_path)
-
-        for _, row in tqdm(data.iterrows()):
-                wsi = row['wsi_file_name']
-                rna_data = row[[x for x in row.keys() if 'rna_' in x]].values.astype(np.float32)
-                rna_data = torch.tensor(rna_data, dtype=torch.float32)
-
-                new_row = dict()
-                new_row['patch_folder'] = wsi
-                new_row['rna_data'] = rna_data
-
-                n_patches = sum(1 for _ in open(os.path.join(patch_path, wsi, 'loc.txt'))) - 2
-                images = [os.path.join(patch_path, wsi, wsi + '_patch_{}.jpeg'.format(i)) for i in range(n_patches)]
-
-                if max_patches is not None:
-                        images = images[:max_patches]
-
-                for i in images:
-                        item = new_row.copy()
-                        item['patch'] = os.path.join(patch_path, patch_path, i)
-                        dataset.append(item)
-
-                return dataset
-'''
 
 def normalize_dfs(train_df, val_df, test_df, labels=False, norm_type='standard'):
     def _get_log(x):

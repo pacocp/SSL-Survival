@@ -10,52 +10,7 @@ import numpy as np
 from tensorboardX import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 
-def pairwise(iterable):
-    "s -> (s0, s1), (s2, s3), (s4, s5), ..."
-    a = iter(iterable)
-    return zip(a, a)
-
-def permutate_batch(item, bag=True):
-    # Obtain range of values and randomly select for
-    # each data_type
-
-    batch_size = item['rna_data'].size(0)
-    range_values = list(range(batch_size))
-    values_wsi = random.sample(range_values, int(0.25*batch_size))
-
-    range_values = [x for x in range_values if x not in values_wsi]
-
-    values_rna = random.sample(range_values,
-                               int(0.25 * batch_size))
-
-    pairs_wsi = pairwise(values_wsi)
-    pairs_rna = pairwise(values_rna)
-    if bag:
-        wsi_key = 'patch_bag'
-    else:
-        wsi_key = 'img'
-
-    for pair in pairs_wsi:
-        idx1 = pair[0]
-        idx2 = pair[1]
-        aux = item[wsi_key][idx1]
-        item[wsi_key][idx1] = item[wsi_key][idx2]
-        item[wsi_key][idx2] = aux
-
-    for pair in pairs_rna:
-        idx1 = pair[0]
-        idx2 = pair[1]
-        aux = item['rna_data'][idx1]
-        item['rna_data'][idx1] = item['rna_data'][idx2]
-        item['rna_data'][idx2] = aux
-    
-    labels = torch.zeros(batch_size, dtype=torch.int64) # for some reason CELoss needs this type
-    labels[values_wsi] = 1
-    labels[values_rna] = 1
-
-    return item, labels
-
-def train(model, criterion, optimizer, dataloaders,
+def train_SSL(model, criterion, optimizer, dataloaders,
           save_dir='checkpoints/models/', device=None,
           log_interval=100, summary_writer=None, num_epochs=100, bag=True, verbose=True):
 
@@ -93,21 +48,17 @@ def train(model, criterion, optimizer, dataloaders,
             last_running_corrects = 0.0
             last_time = time.time()
             for b_idx, batch in tqdm(enumerate(dataloaders[phase])):
-                if bag:
-                    wsi_key = 'patch_bag'
-                else:
-                    wsi_key = 'img'
                 #batch, labels = permutate_batch(batch, bag)
-                labels = batch['label']
+                labels = batch['labels']
                 labels = labels.to(device)
                 
 
-                batch[wsi_key].to(device)
+                batch['image'].to(device)
                 batch['rna_data'].to(device)
 
                 optimizer.zero_grad()
                 with torch.set_grad_enabled(phase=='train'):
-                    outputs = model(batch['rna_data'], batch[wsi_key])
+                    outputs = model(batch['rna_data'], batch['image'])
                     _, preds = torch.max(outputs, 1)
                     
                     loss = criterion(outputs, labels)
@@ -119,8 +70,8 @@ def train(model, criterion, optimizer, dataloaders,
                 summary_step += 1
                 running_loss += loss.item()
                 running_corrects += torch.sum(preds == labels)
-                sizes[phase] += batch[wsi_key].size(0)
-                inputs_seen[phase] += batch[wsi_key].size(0)
+                sizes[phase] += batch['image'].size(0)
+                inputs_seen[phase] += batch['image'].size(0)
                 
                 # Emptying memory
                 del outputs, preds, loss
@@ -168,26 +119,20 @@ def train(model, criterion, optimizer, dataloaders,
      return model, results
 
 
-def evaluate(model, dataloader, dataset_size, bag=True, device=None):
+def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None):
     model.eval()
 
     corrects = 0
     predictions = []
     for batch in tqdm(dataloader):
-        if bag:
-            wsi_key = 'patch_bag'
-        else:
-            wsi_key = 'img'
-
-        #batch, labels = permutate_batch(batch, bag)
         labels = batch['label']
         labels = labels.to(device)
 
-        batch[wsi_key].to(device)
+        batch['image'].to(device)
         batch['rna_data'].to(device)
 
         with torch.set_grad_enabled(False):
-            outputs = model(batch['rna_data'], batch[wsi_key])
+            outputs = model(batch['rna_data'], batch['image'])
             _, preds = torch.max(outputs, 1)
         
         predictions.append(preds.detach().cpu().numpy())

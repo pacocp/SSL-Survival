@@ -5,7 +5,7 @@ import datetime
 
 import numpy as np
 import torch
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tensorboardX import SummaryWriter
 from torchvision import transforms
@@ -17,7 +17,6 @@ from wsi_model import *
 from ssl_training import *
 from read_data import *
 from resnet import resnet50
-#from parallel import DataParallelModel, DataParallelCriterion
 
 parser = argparse.ArgumentParser(description='SSL training')
 parser.add_argument('--config', type=str, help='JSON config file')
@@ -39,6 +38,8 @@ parser.add_argument('--bag_size', type=int, default=50,
                     help='Bag size to use')
 parser.add_argument('--max_patch_per_wsi', type=int, default=100,
                     help='Maximum number of paches per wsi')
+parser.add_argument('--batch_size', type=int, default=16,
+                    help='Batch size')
 
 args = parser.parse_args()
 
@@ -64,11 +65,11 @@ if not os.path.exists(config['save_dir']):
 path_csv = config['path_csv']
 patch_data_path = config['patch_data_path']
 img_size = config['img_size']
-max_patch_per_wsi = config['max_patch_per_wsi']
+max_patch_per_wsi = args.max_patch_per_wsi
 rna_features = config['rna_features']
 quick = config.get('quick', None)
-bag_size = config.get('bag_size', 40)
-batch_size = config.get('batch_size', 64)
+batch_size = args.batch_size
+bag_size = 5
 
 if 'quick' in config:
     quick = config['quick']
@@ -92,12 +93,13 @@ train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['Labels'], r
 
 train_df, val_df = train_test_split(train_df, test_size=0.2, stratify=train_df['Labels'], random_state=args.seed)
 
-train_df, val_df, test_df = normalize_dfs(train_df, val_df, test_df)
+train_df, val_df, test_df, scaler = normalize_dfs(train_df, val_df, test_df)
 
 train_dataset = PatchRNADataset(patch_data_path, train_df, img_size,
                          max_patch_per_wsi=max_patch_per_wsi,
                          bag_size=bag_size,
                          transforms=transforms_, quick=quick)
+
 val_dataset = PatchRNADataset(patch_data_path, val_df, img_size,
                          max_patch_per_wsi=max_patch_per_wsi,
                          bag_size=bag_size,
@@ -158,24 +160,9 @@ if args.checkpoint is not None:
 model = nn.DataParallel(model)
 model.cuda()
 # add optimizer
-'''
-params_to_update = []
-wsi_layers = [model.wsi_encoder.resnet.fc, model.wsi_encoder.resnet.layer4, model.wsi_encoder.resnet.layer3]
-for layer in wsi_layers:
-    for param in layer.named_parameters():
-        params_to_update.append(param)
-
-for param in model.rna_encoder.parameters():
-    if param.requires_grad:
-        params_to_update.append(param)
-for layer in [model.fc, model.out_layer]:
-    for param in layer.parameters():
-        params_to_update.append(param)
-'''
-
 lr = config.get('lr', 3e-3)
 
-optimizer = Adam(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
 
 # add loss function
 criterion = nn.CrossEntropyLoss()
@@ -191,7 +178,7 @@ if args.log:
 else:
     summary_writer = None
 
-model, results = train(model, criterion, optimizer, dataloaders,
+model, results = train_SSL(model, criterion, optimizer, dataloaders,
               save_dir=config['save_dir'],
               device=config['device'], log_interval=config['log_interval'],
               summary_writer=summary_writer,
@@ -199,10 +186,10 @@ model, results = train(model, criterion, optimizer, dataloaders,
 
 # test on test set
 
-test_predictions = evaluate(model, test_dataloader, len(test_dataset),device=config['device'])
+test_predictions = evaluate_SSL(model, test_dataloader, len(test_dataset),device=config['device'])
 
 np.save(config['save_dir']+'test_predictions.npy', test_predictions)
-# save results
+
 
 
 
