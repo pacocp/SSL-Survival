@@ -130,7 +130,7 @@ class PatchBagDataset(Dataset):
             csv_file = self.csv_path
         
         if self.quick:
-            csv_file = csv_file.sample(50)
+            csv_file = csv_file.sample(20)
         
         for i, row in tqdm(csv_file.iterrows()):
             row = row.to_dict()

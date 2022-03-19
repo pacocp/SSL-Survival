@@ -18,7 +18,7 @@ from tensorboardX import SummaryWriter
 
 from resnet import *
 from read_data import PatchBagDataset
-from losses import CoxLoss
+from losses import CoxLoss, get_survival_CI
 from utils import init_weights_xavier
 
 class AggregationModel(nn.Module):
@@ -65,6 +65,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
     best_loss = np.inf
     best_outputs = {'train': [], 'val': {}}
     loss_array = {'train': [], 'val': []}
+    CIs = {'train': [], 'val':[]}
     
     global_summary_step = {'train': 0, 'val': 0}
 
@@ -90,9 +91,15 @@ def train(model, criterion, optimizer, dataloaders, transforms,
             # for logging tensorboard
             last_running_loss = 0.0
 
+            # for CI tracking
+            output_list = []
+            vital_status_list = []
+            survival_months_list = []
+
             for batch in tqdm(dataloaders[phase]):
 
-                #import pdb; pdb.set_trace()
+                vital_status_list.append(batch[1].numpy().flatten())
+                survival_months_list.append(batch[2].numpy().flatten())
 
                 wsi = batch[0]
                 survival_months = batch[1]
@@ -112,6 +119,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
                     # Casts operations to mixed precision
                     #with torch.cuda.amp.autocast():
                     outputs = model(wsi)
+                    output_list.append(outputs.detach().cpu().numpy().flatten())
                     # saving running outputs
                     running_outputs[phase].append(outputs.detach().cpu().numpy())
                     running_labels[phase].append(status.cpu().numpy())
@@ -156,7 +164,17 @@ def train(model, criterion, optimizer, dataloaders, transforms,
 
             loss_array[phase].append(epoch_loss)
 
-            print('{} Loss: {:.4f}'.format(phase, epoch_loss))
+            # CI index
+            output_list = np.concatenate(output_list, axis=0)
+            survival_months_list = np.concatenate(survival_months_list, axis=0)
+            vital_status_list = np.concatenate(vital_status_list, axis=0)
+            CI = get_survival_CI(output_list, survival_months_list, vital_status_list)
+            CIs[phase].append(CI)
+
+            if summary_writer is not None:
+                summary_writer.add_scalar("{}/CI".format(phase), CI, epoch)
+
+            print('{} Loss: {:.4f}, CI: {:.4f}'.format(phase, epoch_loss, CI))
         
             if phase == 'val' and epoch_loss < best_loss:
 
@@ -176,7 +194,9 @@ def train(model, criterion, optimizer, dataloaders, transforms,
             'best_outputs_val': best_outputs['val'],
             'best_outputs_train': best_outputs['train'],
             'labels_val': running_labels['val'],
-            'labels_train': running_labels['train']
+            'labels_train': running_labels['train'],
+            'CIs_train':CIs['train'],
+            'CIs_val':CIs['val']
         }
 
     return model, results
@@ -199,7 +219,7 @@ def evaluate(model, dataloader, dataset_size, transforms, criterion,
     model.eval()
 
     probabilities = []
-    status = []
+    status_all = []
     losses = []
 
     for batch in tqdm(dataloader):        
@@ -218,18 +238,17 @@ def evaluate(model, dataloader, dataset_size, transforms, criterion,
         loss = criterion(outputs, survival_months.view(survival_months.size(0)), status.view(status.size(0)))
 
         probabilities.append(outputs.detach().to('cpu').numpy())
-        status.append(status.detach().to('cpu').numpy())
+        status_all.append(status.detach().to('cpu').numpy())
         losses.append(loss.detach().item())
 
-    probabilities = np.concatenate([probabilities], axis=0, dtype=object)
-    status = np.concatenate([status], axis=0, dtype=object)
-    losses = np.concatenate([losses], axis=0, dtype=object)
+    probabilities = np.concatenate(probabilities, axis=0)
+    status_all = np.concatenate(status_all, axis=0)
 
     print('Loss of the model {}'.format(np.mean(losses)))
     
     test_results = {
         'outputs': probabilities,
-        'status': status,
+        'status': status_all,
         'losses': losses
     }
 
@@ -258,6 +277,7 @@ if __name__ == "__main__":
                         help='Maximum number of paches per wsi')
 
     args = parser.parse_args()
+    save_dir = args.save_dir
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -270,6 +290,7 @@ if __name__ == "__main__":
     print(config)
     print(10*'-')
     
+    # get config values
     path_csv = config['path_csv']
     patch_data_path = config['patch_data_path']
     img_size = config['img_size']
@@ -283,9 +304,10 @@ if __name__ == "__main__":
     else:
         args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
 
-    if not os.path.exists(config['save_dir']):
-        os.mkdir(config['save_dir'])
+    # if not os.path.exists(config['save_dir']):
+    #     os.mkdir(config['save_dir'])
 
+    # specify transforms
     transforms_ = transforms.Compose([
         transforms.ConvertImageDtype(torch.float),      
         transforms.RandomHorizontalFlip(),
@@ -303,7 +325,7 @@ if __name__ == "__main__":
 
     df = pd.read_csv(path_csv)
 
-    # here we can decide what to use as label, maybe the status
+    # datasets and dataloaders
     train_df, test_df = train_test_split(df, test_size=0.2, random_state=args.seed)
 
     train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=args.seed)
@@ -376,7 +398,7 @@ if __name__ == "__main__":
     # train model
     if args.log:
         summary_writer = SummaryWriter(
-                os.path.join(config['summary_path'],
+                os.path.join(save_dir,
                     datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
 
         summary_writer.add_text('config', str(config))
@@ -384,14 +406,18 @@ if __name__ == "__main__":
         summary_writer = None
 
     model, results = train(model, criterion, optimizer, dataloaders,
-                save_dir=config['save_dir'],
-                device=config['device'], log_interval=config['log_interval'],
+                save_dir=save_dir,
+                device=config['device'], 
+                log_interval=config['log_interval'],
                 summary_writer=summary_writer,
                 num_epochs=config['num_epochs'],
                 transforms=transforms_trainval)
 
     # test on test set
-    test_predictions = evaluate(model, test_dataloader, len(test_dataset),device=config['device'])
+    test_predictions = evaluate(model, test_dataloader, len(test_dataset), \
+                                transforms_val, criterion,device=config['device'], \
+                                verbose=True)
 
-    np.save(config['save_dir']+'test_predictions.npy', test_predictions)
+    np.save(save_dir+'results.npy', results)
+    np.save(save_dir+'test_predictions.npy', test_predictions)
     # save results

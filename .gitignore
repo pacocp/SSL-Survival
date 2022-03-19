@@ -1,2 +1,5 @@
 __pycache__
 /data
+/checkpoints
+*.out
+*.err
