@@ -1,4 +1,6 @@
+import pdb
 import torch
+from lifelines.utils import concordance_index
 
 def memory_usage(device):
     """
@@ -28,4 +30,8 @@ def weights_init_dcgan(m):
         torch.nn.init.normal_(m.weight.data, 1.0, 0.02)
         torch.nn.init.constant_(m.bias.data, 0)
 
-            
+def get_survival_CI(output_list, survival_months, vital_status):
+
+    CI = concordance_index(survival_months, -output_list, vital_status)
+
+    return CI

@@ -362,7 +362,7 @@ class PatchRNADataset(Dataset):
 
 class RNADataset(Dataset):
     def __init__(self, csv_path, quick=False, num_samples=20):
-        self._csv_path = csv_path
+        self.csv_path = csv_path
         self.data = None
         self.quick = quick
         self.num_samples = num_samples
@@ -383,7 +383,7 @@ class RNADataset(Dataset):
         rna_columns = [x for x in csv_file.columns if 'rna_' in x]
         self.rna_data = csv_file[rna_columns].values.astype(np.float32)
         self.rna_data = torch.tensor(self.rna_data, dtype=torch.float32)
-        self.vital_status = csv_file['vital_status'].values.astype(np.float32)
+        self.vital_status = csv_file['status'].values.astype(np.float32)
         self.vital_status = torch.tensor(self.vital_status, dtype=torch.float32)
         self.survival_months = csv_file['survival_months'].values.astype(np.float32)
         self.survival_months = torch.tensor(self.survival_months, dtype=torch.float32)
