@@ -19,6 +19,7 @@ from tensorboardX import SummaryWriter
 from resnet import *
 from read_data import PatchBagDataset
 from losses import CoxLoss
+from utils import init_weights_xavier
 
 class AggregationModel(nn.Module):
     def __init__(self, resnet, resnet_dim=2048, n_outputs=1):
@@ -91,8 +92,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
 
             for batch in tqdm(dataloaders[phase]):
 
-                
-                import pdb; pdb.set_trace()
+                #import pdb; pdb.set_trace()
 
                 wsi = batch[0]
                 survival_months = batch[1]
@@ -353,6 +353,7 @@ if __name__ == "__main__":
             param.requires_grad = True
 
     model = AggregationModel(wsi_encoder)
+    model.apply(init_weights_xavier)
 
     if args.checkpoint is not None:
         print('Restoring from checkpoint')

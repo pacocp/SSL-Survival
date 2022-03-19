@@ -31,3 +31,29 @@ class CoxLoss(nn.Module):
 
     def forward(self,cox_scores,times,status):
         return cox_loss(cox_scores,times,status)
+
+# https://github.com/gevaertlab/MultiScaleFusionPrognostic/blob/b2eaa9fd7f47c040605cf0771003b2933e229720/feature_eval.py#L84
+def get_survival_CI(output_list, ids_list, survival_months, vital_status):
+    ids_unique = sorted(list(set(ids_list)))
+    id_to_scores = {}
+    id_to_survival_months = {}
+    id_to_vital_status = {}
+
+    for i in range(len(output_list)):
+        id = ids_list[i]
+        id_to_scores[id] = id_to_scores.get(id, []) + [output_list[i, 0]]
+        id_to_survival_months[id] = survival_months[i]
+        id_to_vital_status[id] = vital_status[i]
+
+    for k in id_to_scores.keys():
+        id_to_scores[k] = np.mean(id_to_scores[k])
+
+    score_list = np.array([id_to_scores[id] for id in ids_unique])
+    survival_months_list = np.array([id_to_survival_months[id] for id in ids_unique])
+    vital_status_list = np.array([id_to_vital_status[id] for id in ids_unique])
+
+    CI = concordance_index(survival_months_list, -score_list, vital_status_list)
+    pandas_output = pd.DataFrame({'id': ids_unique, 'score': score_list, 'survival_months': survival_months_list,
+                                  'vital_status': vital_status_list})
+
+    return CI, pandas_output
