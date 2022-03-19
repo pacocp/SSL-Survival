@@ -1,0 +1,16 @@
+{
+    "path_csv": "../data/LUAD_overall_survival_nonan.csv",
+    "patch_data_path": "_Patches256x256/",
+    "img_size": 256,
+    "max_patch_per_wsi":100,
+    "weights_decay":0,
+    "lr": 2e-4,
+    "num_epochs": 50,
+    "n_workers": 12,
+    "device": 0,
+    "quick": 0,
+    "flag": "wsi_training",
+    "log_interval": 50,
+    "bag_size": 25,
+    "batch_size": 8
+}
