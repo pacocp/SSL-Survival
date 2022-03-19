@@ -20,7 +20,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 from types_ import *
 from utils import *
-from losses import CoxLoss
+from losses import *
 from read_data import *
 
 class RNAEncoder(nn.Module):
