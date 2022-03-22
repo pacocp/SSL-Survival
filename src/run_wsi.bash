@@ -5,4 +5,4 @@ mkdir $destfolder
 codefile=wsi_model.py 
 python $codefile --config $sourcefolder/configs/config_WSI.json \
                     --save_dir $destfolder \
-                    --log 1
+                    --log 1     # whether to log to tensorboard

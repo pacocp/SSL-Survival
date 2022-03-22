@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 import os
+import pickle
 import json
 import argparse
 import datetime
@@ -150,7 +151,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
                 loss = loss.detach()
                 torch.cuda.empty_cache()
 
-                if (summary_step % log_interval == 0):
+                if ((summary_step % log_interval == 0) & (summary_step > log_interval)) | (summary_step == 0):
                     loss_to_log = (running_loss - last_running_loss) / inputs_seen[phase]
 
                     if summary_writer is not None:
@@ -191,12 +192,12 @@ def train(model, criterion, optimizer, dataloaders, transforms,
     results = {
             'best_epoch': best_epoch,
             'best_loss': best_loss,
-            'best_outputs_val': best_outputs['val'],
-            'best_outputs_train': best_outputs['train'],
-            'labels_val': running_labels['val'],
-            'labels_train': running_labels['train'],
-            'CIs_train':CIs['train'],
-            'CIs_val':CIs['val']
+            'best_outputs_val': np.array(best_outputs['val']).flatten(),
+            'best_outputs_train': np.array(best_outputs['train']).flatten(),
+            'labels_val': np.array(running_labels['val']).flatten(),
+            'labels_train': np.array(running_labels['train']).flatten(),
+            'best_CI_train':CIs['train'][best_epoch],
+            'best_CIs_val':CIs['val'][best_epoch]
         }
 
     return model, results
@@ -220,12 +221,16 @@ def evaluate(model, dataloader, dataset_size, transforms, criterion,
 
     probabilities = []
     status_all = []
+    survival_months_all = []
     losses = []
 
     for batch in tqdm(dataloader):        
         wsi = batch[0]
         survival_months = batch[1]
         status = batch[2]
+
+        status_all.append(status)
+        survival_months_all.append(survival_months)
         
         survival_months = survival_months.flatten().to(device)
         status = status.flatten().to(device)
@@ -238,18 +243,24 @@ def evaluate(model, dataloader, dataset_size, transforms, criterion,
         loss = criterion(outputs, survival_months.view(survival_months.size(0)), status.view(status.size(0)))
 
         probabilities.append(outputs.detach().to('cpu').numpy())
-        status_all.append(status.detach().to('cpu').numpy())
         losses.append(loss.detach().item())
 
-    probabilities = np.concatenate(probabilities, axis=0)
+    probabilities = np.concatenate(probabilities, axis=0).flatten()
     status_all = np.concatenate(status_all, axis=0)
+    survival_months_all = np.concatenate(survival_months_all, axis=0)
 
     print('Loss of the model {}'.format(np.mean(losses)))
-    
+
+    # import pdb; pdb.set_trace()
+    CI = get_survival_CI(probabilities, survival_months_all, status_all)
+    print('CI of the model {}'.format(CI))
+
     test_results = {
         'outputs': probabilities,
         'status': status_all,
-        'losses': losses
+        'losses': losses,
+        'survival_months':survival_months_all,
+        'CI':CI
     }
 
     return test_results
@@ -365,16 +376,21 @@ if __name__ == "__main__":
 
     print('Initializing models')
 
-    wsi_encoder = resnet50(pretrained=True)
+    wsi_encoder = resnet18(pretrained=True)
 
-    layers_to_train = [wsi_encoder.fc, wsi_encoder.layer4, wsi_encoder.layer3]
+    layers_to_train = [wsi_encoder.fc] 
+    if config['retrain_l3']:
+        layers_to_train.append(wsi_encoder.layer3) 
+    if config['retrain_l4']:
+        layers_to_train.append(wsi_encoder.layer4) 
+        
     for param in wsi_encoder.parameters():
         param.requires_grad = False
     for layer in layers_to_train:
         for n, param in layer.named_parameters():
             param.requires_grad = True
 
-    model = AggregationModel(wsi_encoder)
+    model = AggregationModel(wsi_encoder, resnet_dim=512, n_outputs=1)
     model.apply(init_weights_xavier)
 
     if args.checkpoint is not None:
@@ -418,6 +434,13 @@ if __name__ == "__main__":
                                 transforms_val, criterion,device=config['device'], \
                                 verbose=True)
 
-    np.save(save_dir+'results.npy', results)
-    np.save(save_dir+'test_predictions.npy', test_predictions)
+    # np.save(save_dir+'results.npy', results)
+    # np.save(save_dir+'test_predictions.npy', test_predictions)
+
+    with open(save_dir+'test_predictions.pkl', 'wb') as f:
+        pickle.dump(test_predictions, f)
+
+    with open(save_dir+'results.pkl', 'wb') as f:
+        pickle.dump(results, f)
+
     # save results

@@ -5,12 +5,15 @@
     "max_patch_per_wsi":100,
     "weights_decay":0,
     "lr": 2e-4,
-    "num_epochs": 50,
-    "n_workers": 12,
+    "num_epochs": 30, 
+    "n_workers": 14,
     "device": 0,
     "quick": 0,
     "flag": "wsi_training",
     "log_interval": 50,
-    "bag_size": 25,
-    "batch_size": 8
+    "bag_size": 50,
+    "batch_size": 8,
+    "retrain_l3": 0,
+    "retrain_l4": 0,
+    "use_SSL_pretrained":0
 }
