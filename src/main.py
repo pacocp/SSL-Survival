@@ -64,8 +64,8 @@ if 'flag' in config:
 else:
     args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
 
-if not os.path.exists(config['save_dir']):
-    os.mkdir(config['save_dir'])
+if not os.path.exists(args.save_dir):
+    os.mkdir(args.save_dir)
 
 path_csv = config['path_csv']
 patch_data_path = config['patch_data_path']
