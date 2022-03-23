@@ -175,6 +175,9 @@ def train(model, criterion, optimizer, dataloaders, transforms,
             if summary_writer is not None:
                 summary_writer.add_scalar("{}/CI".format(phase), CI, epoch)
 
+            if summary_writer is not None:
+                summary_writer.add_scalar("{}/loss".format(phase), epoch_loss, epoch)
+
             print('{} Loss: {:.4f}, CI: {:.4f}'.format(phase, epoch_loss, CI))
         
             if phase == 'val' and epoch_loss < best_loss:
@@ -188,7 +191,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
     torch.save(model.state_dict(), os.path.join(save_dir, 'model_last.pt'))
     
     model.load_state_dict(torch.load(os.path.join(save_dir, 'model_dict_best.pt')))
-
+    
     results = {
             'best_epoch': best_epoch,
             'best_loss': best_loss,
@@ -307,8 +310,10 @@ if __name__ == "__main__":
     img_size = config['img_size']
     max_patch_per_wsi = config['max_patch_per_wsi']
     quick = config.get('quick', None)
+    num_samples = config.get('num_samples', 20)
     bag_size = config.get('bag_size', 40)
     batch_size = config.get('batch_size', 64)
+    direct = config.get('direct', 0)
 
     if 'flag' in config:
         args.flag = config['flag']
@@ -344,17 +349,17 @@ if __name__ == "__main__":
     train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
                          max_patches_total=max_patch_per_wsi,
                          bag_size=bag_size,
-                         transforms=transforms_, quick=quick)
+                         transforms=transforms_, quick=quick, num_samples=num_samples)
 
     val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
                             max_patches_total=max_patch_per_wsi,
                             bag_size=bag_size,
-                            transforms=transforms_val, quick=quick)
+                            transforms=transforms_val, quick=0)
 
     test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
                             max_patches_total=max_patch_per_wsi,
                             bag_size=bag_size,
-                            transforms=transforms_val, quick=quick)
+                            transforms=transforms_val, quick=0)
 
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
                 num_workers=config['n_workers'], pin_memory=True, shuffle=True)
@@ -376,36 +381,46 @@ if __name__ == "__main__":
 
     print('Initializing models')
 
-    wsi_encoder = resnet18(pretrained=True)
+    wsi_encoder = resnet18(pretrained=bool(1-direct))
 
-    layers_to_train = [wsi_encoder.fc] 
-    if config['retrain_l3']:
-        layers_to_train.append(wsi_encoder.layer3) 
-    if config['retrain_l4']:
-        layers_to_train.append(wsi_encoder.layer4) 
-        
-    for param in wsi_encoder.parameters():
-        param.requires_grad = False
-    for layer in layers_to_train:
-        for n, param in layer.named_parameters():
-            param.requires_grad = True
+    # if pretrain --> freeze specified layers, else retrain everything
+    if direct == 0:
+        layers_to_train = [wsi_encoder.fc] 
+        if config['retrain_l3']:
+            layers_to_train.append(wsi_encoder.layer3) 
+        if config['retrain_l4']:
+            layers_to_train.append(wsi_encoder.layer4) 
+            
+        for param in wsi_encoder.parameters():
+            param.requires_grad = False
+        for layer in layers_to_train:
+            for n, param in layer.named_parameters():
+                param.requires_grad = True
 
     model = AggregationModel(wsi_encoder, resnet_dim=512, n_outputs=1)
-    model.apply(init_weights_xavier)
+    model.cox_regression_layer.apply(init_weights_xavier)
 
+    #import pdb; pdb.set_trace()
     if args.checkpoint is not None:
         print('Restoring from checkpoint')
         print(args.checkpoint)
-        model.load_state_dict(torch.load(args.checkpoint))
+        model.resnet.load_state_dict(torch.load(args.checkpoint))
         print('Loaded model from checkpoint')
 
     #model = model.cuda(config['device'])
-    model = nn.DataParallel(model)
-    model.cuda()
+    #model = nn.DataParallel(model)
+    model = model.to(config['device'])
 
     # learning rate and optimizer
     lr = config.get('lr', 3e-3)
-    optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+
+    if direct == 0:
+        # optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+        optimizer = AdamW([{'params': model.resnet.layer4.parameters(), 'lr': 1e-5}, \
+                            {'params': model.resnet.layer3.parameters(), 'lr': 3e-7}], \
+                            weight_decay = config['weights_decay'], lr=lr)
+    else:
+        optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
 
     # add loss function
     # loss function in this shit

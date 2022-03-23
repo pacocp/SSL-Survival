@@ -111,7 +111,7 @@ def get_data_rna_bag_wsi(csv_path, patch_path:str , limit: int, bag_size: int, q
 
 class PatchBagDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None, bag_size=40,
-            max_patches_total=300, quick=False):
+            max_patches_total=300, quick=False, num_samples=20):
         self.patch_data_path = patch_data_path
         self.csv_path = csv_path
         self.img_size = img_size
@@ -121,6 +121,7 @@ class PatchBagDataset(Dataset):
         self.quick = quick
         self.index = []
         self.data = {}
+        self.num_samples = num_samples
         self._preprocess()
 
     def _preprocess(self):
@@ -130,7 +131,7 @@ class PatchBagDataset(Dataset):
             csv_file = self.csv_path
         
         if self.quick:
-            csv_file = csv_file.sample(20)
+            csv_file = csv_file.sample(self.num_samples)
         
         for i, row in tqdm(csv_file.iterrows()):
             row = row.to_dict()
