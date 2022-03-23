@@ -73,12 +73,12 @@ class PatchBagDataset(Dataset):
                     label = label.astype(np.float32)
 
             project = row['tcga_project'] 
-            if not os.path.exists(os.path.join('../'+project+self.patch_data_path, WSI)):
-                print('Not exist {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
+            if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)):
+                print('Not exist {}'.format(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)))
                 continue
             
             #try:
-            path = os.path.join('../'+project+self.patch_data_path, WSI, WSI)
+            path = os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
             try:
                 lmdb_connection = lmdb.open(path,
                                             subdir=False, readonly=True, 
@@ -291,12 +291,12 @@ class PatchRNADataset(Dataset):
             label = torch.tensor(label, dtype=torch.int64)
             #label = label.flatten()
             project = row['tcga_project'] 
-            if not os.path.exists(os.path.join('../../Roche-TCGA/'+project+self.patch_data_path, WSI)):
-                print('Not exist {}'.format(os.path.join('../../Roche-TCGA/'+project+self.patch_data_path, WSI)))
+            if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)):
+                print('Not exist {}'.format(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)))
                 continue
             
             #try:
-            path = os.path.join('../../Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
+            path = os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
             try:
                 lmdb_connection = lmdb.open(path,
                                             subdir=False, readonly=True, 
