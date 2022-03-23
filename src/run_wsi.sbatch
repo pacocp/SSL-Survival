@@ -1,7 +1,7 @@
 #!/usr/bin/bash
-#SBATCH --job-name=wsi_dir
-#SBATCH --output=wsi_dir.out
-#SBATCH --error=wsi_dir.err
+#SBATCH --job-name=wsi_im
+#SBATCH --output=wsi_im.out
+#SBATCH --error=wsi_im.err
 #SBATCH --time=48:00:00
 #SBATCH -p gpu
 #SBATCH -G 1

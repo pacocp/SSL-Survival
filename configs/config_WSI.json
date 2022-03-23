@@ -5,7 +5,7 @@
     "max_patch_per_wsi":100,
     "weights_decay":0,
     "lr": 1e-3,
-    "num_epochs": 30, 
+    "num_epochs": 10, 
     "n_workers": 4,
     "device": 0,
     "quick": 1,
@@ -16,5 +16,5 @@
     "batch_size": 8,
     "retrain_l3": 0,
     "retrain_l4": 1,
-    "direct":1
+    "direct":0
 }

@@ -291,10 +291,6 @@ if __name__ == "__main__":
                         help='Maximum number of paches per wsi')
 
     args = parser.parse_args()
-    save_dir = args.save_dir
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     with open(args.config) as f:
         config = json.load(f)
@@ -303,7 +299,12 @@ if __name__ == "__main__":
     print('Config for this experiment \n')
     print(config)
     print(10*'-')
-    
+
+    if 'flag' in config:
+        args.flag = config['flag']
+    else:
+        args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
+
     # get config values
     path_csv = config['path_csv']
     patch_data_path = config['patch_data_path']
@@ -314,14 +315,6 @@ if __name__ == "__main__":
     bag_size = config.get('bag_size', 40)
     batch_size = config.get('batch_size', 64)
     direct = config.get('direct', 0)
-
-    if 'flag' in config:
-        args.flag = config['flag']
-    else:
-        args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
-
-    # if not os.path.exists(config['save_dir']):
-    #     os.mkdir(config['save_dir'])
 
     # specify transforms
     transforms_ = transforms.Compose([
@@ -337,125 +330,129 @@ if __name__ == "__main__":
 
     transforms_trainval = {'train': transforms_, 'val': transforms_val}
 
-    print('Loading dataset...')
+    for seed in [0,42,2022,72,273]:
 
-    df = pd.read_csv(path_csv)
+        save_dir = args.save_dir+'_'+str(seed)
 
-    # datasets and dataloaders
-    train_df, test_df = train_test_split(df, test_size=0.2, random_state=args.seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
-    train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=args.seed)
+        # if not os.path.exists(config['save_dir']):
+        #     os.mkdir(config['save_dir'])
 
-    train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
-                         max_patches_total=max_patch_per_wsi,
-                         bag_size=bag_size,
-                         transforms=transforms_, quick=quick, num_samples=num_samples)
+        print('Loading dataset...')
 
-    val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
+        df = pd.read_csv(path_csv)
+
+        # datasets and dataloaders
+        train_df, test_df = train_test_split(df, test_size=0.2, random_state=seed)
+
+        train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=seed)
+
+        train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
                             max_patches_total=max_patch_per_wsi,
                             bag_size=bag_size,
-                            transforms=transforms_val, quick=0)
+                            transforms=transforms_, quick=quick, num_samples=num_samples)
 
-    test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
-                            max_patches_total=max_patch_per_wsi,
-                            bag_size=bag_size,
-                            transforms=transforms_val, quick=0)
+        val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
+                                max_patches_total=max_patch_per_wsi,
+                                bag_size=bag_size,
+                                transforms=transforms_val, quick=0)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
-                num_workers=config['n_workers'], pin_memory=True, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
-                pin_memory=True, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
-                num_workers=config['n_workers'], pin_memory=True, shuffle=False)
+        test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
+                                max_patches_total=max_patch_per_wsi,
+                                bag_size=bag_size,
+                                transforms=transforms_val, quick=0)
 
-    dataloaders = {
-            'train': train_dataloader,
-            'val': val_dataloader}
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
+                    num_workers=config['n_workers'], pin_memory=True, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
+                    pin_memory=True, shuffle=False)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
+                    num_workers=config['n_workers'], pin_memory=True, shuffle=False)
 
-    dataset_sizes = {
-            'train': len(train_dataset),
-            'val': len(val_dataset)
-            }
+        dataloaders = {
+                'train': train_dataloader,
+                'val': val_dataloader}
 
-    print('Finished loading dataset and creating dataloader')
+        dataset_sizes = {
+                'train': len(train_dataset),
+                'val': len(val_dataset)
+                }
 
-    print('Initializing models')
+        print('Finished loading dataset and creating dataloader')
 
-    wsi_encoder = resnet18(pretrained=bool(1-direct))
+        print('Initializing models')
 
-    # if pretrain --> freeze specified layers, else retrain everything
-    if direct == 0:
-        layers_to_train = [wsi_encoder.fc] 
-        if config['retrain_l3']:
-            layers_to_train.append(wsi_encoder.layer3) 
-        if config['retrain_l4']:
-            layers_to_train.append(wsi_encoder.layer4) 
-            
-        for param in wsi_encoder.parameters():
-            param.requires_grad = False
-        for layer in layers_to_train:
-            for n, param in layer.named_parameters():
-                param.requires_grad = True
+        wsi_encoder = resnet18(pretrained=bool(1-direct))
 
-    model = AggregationModel(wsi_encoder, resnet_dim=512, n_outputs=1)
-    model.cox_regression_layer.apply(init_weights_xavier)
+        # if pretrain (from imagenet or SSL) --> freeze specified layers, else retrain everything
+        if direct == 0:
+            layers_to_train = [wsi_encoder.fc] 
+            if config['retrain_l3']:
+                layers_to_train.append(wsi_encoder.layer3) 
+            if config['retrain_l4']:
+                layers_to_train.append(wsi_encoder.layer4) 
+                
+            for param in wsi_encoder.parameters():
+                param.requires_grad = False
+            for layer in layers_to_train:
+                for n, param in layer.named_parameters():
+                    param.requires_grad = True
 
-    #import pdb; pdb.set_trace()
-    if args.checkpoint is not None:
-        print('Restoring from checkpoint')
-        print(args.checkpoint)
-        model.resnet.load_state_dict(torch.load(args.checkpoint))
-        print('Loaded model from checkpoint')
+        model = AggregationModel(wsi_encoder, resnet_dim=512, n_outputs=1)
+        model.cox_regression_layer.apply(init_weights_xavier)
 
-    #model = model.cuda(config['device'])
-    #model = nn.DataParallel(model)
-    model = model.to(config['device'])
+        #import pdb; pdb.set_trace()
+        if args.checkpoint is not None:
+            print('Restoring from checkpoint')
+            print(args.checkpoint)
+            model.resnet.load_state_dict(torch.load(args.checkpoint))
+            print('Loaded model from checkpoint')
 
-    # learning rate and optimizer
-    lr = config.get('lr', 3e-3)
+        # model on gpu
+        model = model.to(config['device'])
 
-    if direct == 0:
-        # optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
-        optimizer = AdamW([{'params': model.resnet.layer4.parameters(), 'lr': 1e-5}, \
-                            {'params': model.resnet.layer3.parameters(), 'lr': 3e-7}], \
-                            weight_decay = config['weights_decay'], lr=lr)
-    else:
-        optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+        # learning rate and optimizer
+        lr = config.get('lr', 3e-3)
 
-    # add loss function
-    # loss function in this shit
-    criterion = CoxLoss() 
+        if direct == 0:
+            # optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+            optimizer = AdamW([{'params': model.resnet.layer4.parameters(), 'lr': 1e-5}, \
+                                {'params': model.resnet.layer3.parameters(), 'lr': 3e-7}], \
+                                weight_decay = config['weights_decay'], lr=lr)
+        else:
+            optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
 
-    # train model
-    if args.log:
-        summary_writer = SummaryWriter(
-                os.path.join(save_dir,
-                    datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
+        # add loss function
+        criterion = CoxLoss() 
 
-        summary_writer.add_text('config', str(config))
-    else:
-        summary_writer = None
+        # train model
+        if args.log:
+            summary_writer = SummaryWriter(
+                    os.path.join(save_dir,
+                        datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
 
-    model, results = train(model, criterion, optimizer, dataloaders,
-                save_dir=save_dir,
-                device=config['device'], 
-                log_interval=config['log_interval'],
-                summary_writer=summary_writer,
-                num_epochs=config['num_epochs'],
-                transforms=transforms_trainval)
+            summary_writer.add_text('config', str(config))
+        else:
+            summary_writer = None
 
-    # test on test set
-    test_predictions = evaluate(model, test_dataloader, len(test_dataset), \
-                                transforms_val, criterion,device=config['device'], \
-                                verbose=True)
+        model, results = train(model, criterion, optimizer, dataloaders,
+                    save_dir=save_dir,
+                    device=config['device'], 
+                    log_interval=config['log_interval'],
+                    summary_writer=summary_writer,
+                    num_epochs=config['num_epochs'],
+                    transforms=transforms_trainval)
 
-    # np.save(save_dir+'results.npy', results)
-    # np.save(save_dir+'test_predictions.npy', test_predictions)
+        # test on test set
+        test_predictions = evaluate(model, test_dataloader, len(test_dataset), \
+                                    transforms_val, criterion,device=config['device'], \
+                                    verbose=True)
 
-    with open(save_dir+'test_predictions.pkl', 'wb') as f:
-        pickle.dump(test_predictions, f)
+        # save results
+        with open(save_dir+'test_predictions.pkl', 'wb') as f:
+            pickle.dump(test_predictions, f)
 
-    with open(save_dir+'results.pkl', 'wb') as f:
-        pickle.dump(results, f)
-
-    # save results
+        with open(save_dir+'results.pkl', 'wb') as f:
+            pickle.dump(results, f)
