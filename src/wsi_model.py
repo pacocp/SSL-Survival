@@ -188,7 +188,7 @@ def train(model, criterion, optimizer, dataloaders, transforms,
                 best_outputs['val'] = running_outputs['val']
                 best_outputs['train'] = running_outputs['train']
 
-    torch.save(model.state_dict(), os.path.join(save_dir, 'model_last.pt'))
+    #torch.save(model.state_dict(), os.path.join(save_dir, 'model_last.pt'))
     
     model.load_state_dict(torch.load(os.path.join(save_dir, 'model_dict_best.pt')))
     
@@ -279,7 +279,7 @@ if __name__ == "__main__":
             help='Flag to use for saving the checkpoints')
     parser.add_argument('--seed', type=int, default=99,
             help='Seed for random generation')
-    parser.add_argument('--log', type=int, default=0,
+    parser.add_argument('--log', type=int, default=1,
             help='Use tensorboard for experiment logging')
     parser.add_argument('--parallel', type=int, default=0,
             help='Use DataParallel training')
@@ -289,6 +289,10 @@ if __name__ == "__main__":
                         help='Bag size to use')
     parser.add_argument('--max_patch_per_wsi', type=int, default=100,
                         help='Maximum number of paches per wsi')
+    parser.add_argument('--num_samples', type=int, default=None,
+                        help='Number of samples from training set')
+    parser.add_argument('--seeds', type=str, default=None,
+                        help='Random seeds, separated by comma')
 
     args = parser.parse_args()
 
@@ -311,10 +315,20 @@ if __name__ == "__main__":
     img_size = config['img_size']
     max_patch_per_wsi = config['max_patch_per_wsi']
     quick = config.get('quick', None)
-    num_samples = config.get('num_samples', 20)
     bag_size = config.get('bag_size', 40)
     batch_size = config.get('batch_size', 64)
-    direct = config.get('direct', 0)
+
+    # from args
+    num_samples = args.num_samples
+    seeds = args.seeds
+
+    # set num_epochs
+    if (num_samples == 5) | (num_samples == 10):
+        num_epochs = 10
+    elif num_samples == 20:
+        num_epochs = 15
+    elif num_samples == 150:
+        num_epochs = 20
 
     # specify transforms
     transforms_ = transforms.Compose([
@@ -330,15 +344,34 @@ if __name__ == "__main__":
 
     transforms_trainval = {'train': transforms_, 'val': transforms_val}
 
-    for seed in [0,42,2022,72,273]:
+    if not os.path.exists(args.save_dir):
+            os.mkdir(args.save_dir)
+
+    for seed in [int(i) for i in seeds.split(",")]: #[0,42,2022,72,273,61,9,99,86,54]:
 
         save_dir = args.save_dir+'_'+str(seed)
+
+        # set bool for pretraining based on mode
+        mode = save_dir.split('/')[-2]
+        if 'dir' in mode:
+            direct = 1
+        elif ('ssl' in mode) or ('im' in mode):
+            direct = 0
+        else:
+            print('Wrong save_dir format')
+            exit()
+        
+        # set checkpoint
+        if 'ssl' in mode:
+            checkpoint = '/home/users/mpizuric/code/SSL-Survival/checkpoints/ssl_training/wsi_encoder.pt'
+        else:
+            checkpoint = None
 
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        # if not os.path.exists(config['save_dir']):
-        #     os.mkdir(config['save_dir'])
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
 
         print('Loading dataset...')
 
@@ -404,10 +437,10 @@ if __name__ == "__main__":
         model.cox_regression_layer.apply(init_weights_xavier)
 
         #import pdb; pdb.set_trace()
-        if args.checkpoint is not None:
+        if checkpoint is not None:
             print('Restoring from checkpoint')
-            print(args.checkpoint)
-            model.resnet.load_state_dict(torch.load(args.checkpoint))
+            print(checkpoint)
+            model.resnet.load_state_dict(torch.load(checkpoint))
             print('Loaded model from checkpoint')
 
         # model on gpu
@@ -442,7 +475,7 @@ if __name__ == "__main__":
                     device=config['device'], 
                     log_interval=config['log_interval'],
                     summary_writer=summary_writer,
-                    num_epochs=config['num_epochs'],
+                    num_epochs=num_epochs,
                     transforms=transforms_trainval)
 
         # test on test set
