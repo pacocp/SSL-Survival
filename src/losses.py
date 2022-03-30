@@ -34,7 +34,17 @@ class CoxLoss(nn.Module):
         return cox_loss(cox_scores,times,status)
 
 def get_survival_CI(output_list, survival_months, vital_status):
+    import numpy as np
+    sorted_indices = np.argsort(-survival_months)
+    survival_months = survival_months[sorted_indices]
+    output_list = output_list[sorted_indices]
+    vital_status = vital_status[sorted_indices]
 
     CI = concordance_index(survival_months, -output_list, vital_status)
 
     return CI
+
+def brier_score(cox_scores, times, status):
+    times, sorted_indices = torch.sort(-times)
+    cox_scores = cox_scores[sorted_indices]
+    status = status[sorted_indices]

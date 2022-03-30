@@ -11,7 +11,7 @@ from tensorboardX import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 
 def train_SSL(model, criterion, optimizer, dataloaders,
-          save_dir='checkpoints/models/', device=None,
+          save_dir='checkpoints/models/', device=None, transforms=None,
           log_interval=100, summary_writer=None, num_epochs=100, bag=True, verbose=True):
 
      since = time.time()
@@ -47,7 +47,10 @@ def train_SSL(model, criterion, optimizer, dataloaders,
             last_running_loss = 0.0
             last_running_corrects = 0.0
             last_time = time.time()
-            for b_idx, batch in tqdm(enumerate(dataloaders[phase])):
+            for b_idx, batch in enumerate(dataloaders[phase]):
+                if b_idx != 0:
+                    end = time.time()
+                    print('Batch loading time {}'.format(end-start))
                 #batch, labels = permutate_batch(batch, bag)
                 labels = batch['labels']
                 labels = labels.to(device)
@@ -55,6 +58,12 @@ def train_SSL(model, criterion, optimizer, dataloaders,
 
                 batch['image'] = batch['image'].to(device)
                 batch['rna_data'] = batch['rna_data'].to(device)
+                
+                start = time.time()
+                if transforms:
+                    batch['image'] = transforms[phase](batch['image'])
+                end = time.time()
+                print('Transform time {}'.format(end-start))
 
                 optimizer.zero_grad()
                 with torch.set_grad_enabled(phase=='train'):
@@ -88,7 +97,7 @@ def train_SSL(model, criterion, optimizer, dataloaders,
                     last_running_loss = running_loss
                     last_running_corrects = running_corrects
                     inputs_seen[phase] = 0.0
-
+                start = time.time()
             global_summary_step[phase] = summary_step
             epoch_loss = running_loss / sizes[phase]
             epoch_acc = running_corrects.item() / sizes[phase]
@@ -99,6 +108,7 @@ def train_SSL(model, criterion, optimizer, dataloaders,
             if verbose:
                 print('{} Loss: {:.4f} Acc: {:.4f}'.format(
                       phase, epoch_loss, epoch_acc))
+            
             if phase == 'val' and epoch_loss < best_loss:
                 best_acc = epoch_acc
                 best_loss = epoch_loss
@@ -119,13 +129,13 @@ def train_SSL(model, criterion, optimizer, dataloaders,
      return model, results
 
 
-def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None):
+def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None, transforms=None):
     model.eval()
 
     corrects = 0
     predictions = []
     real_labels = []
-    for batch in tqdm(dataloader):
+    for batch in dataloader:
         labels = batch['labels']
         labels = labels.to(device)
         
@@ -133,6 +143,8 @@ def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None):
         batch['image'] = batch['image'].to(device)
         batch['rna_data'] = batch['rna_data'].to(device)
 
+        if transforms:
+            batch['image'] = transforms(batch['image'])
         with torch.set_grad_enabled(False):
             outputs = model(batch['rna_data'], batch['image'])
             _, preds = torch.max(outputs, 1)

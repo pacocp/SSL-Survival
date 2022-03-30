@@ -19,13 +19,14 @@ class SSLModel(nn.Module):
         for h_dim in hidden_dims:
             modules.append(
                 nn.Sequential(
+                    nn.Dropout(),
                     nn.Linear(in_channels, h_dim),
                     nn.LeakyReLU())
             )
             in_channels = h_dim
 
         self.fc = nn.Sequential(*modules)
-        self.out_layer = nn.Linear(in_channels, out_channels)
+        self.out_layer = nn.Sequential(nn.Dropout(),nn.Linear(in_channels, out_channels))
         self.distance = distance
 
     def forward(self, x1, x2):
