@@ -1,42 +1,48 @@
 import torch
 import torch.nn as nn
-import os
-import json
-import argparse
-import datetime
-import numpy as np
 import torch
 from torch.optim import Adam, AdamW
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from tensorboardX import SummaryWriter
 from torchvision import transforms
 from sklearn.model_selection import train_test_split
+
+import numpy as np
 import pandas as pd
+
+import os
+import pickle
+import json
+import argparse
+import datetime
 from tqdm import tqdm
+from tensorboardX import SummaryWriter
 
 from resnet import *
 from read_data import PatchBagDataset
+from losses import CoxLoss, get_survival_CI
+from utils import init_weights_xavier
 
 class AggregationModel(nn.Module):
-    def __init__(self, resnet, resnet_dim=2048):
+    def __init__(self, resnet, resnet_dim=2048, n_outputs=1):
         super(AggregationModel, self).__init__()
         self.resnet = resnet
         self.resnet_dim = resnet_dim
+        self.cox_regression_layer = nn.Linear(resnet_dim, n_outputs)
 
     def forward(self, x):
         (batch_size, bag_size, c, h, w) = x.shape
         x = x.reshape(-1, c, h, w)
         features = self.resnet.forward_extract(x)
         features = features.view(batch_size, bag_size, self.resnet_dim)
-
+        
         features = features.mean(dim=1)
-        return features
+
+        return self.cox_regression_layer(features)
 
 def train(model, criterion, optimizer, dataloaders, transforms,
           save_dir='checkpoints/models/', device='cpu',
           log_interval=100, summary_writer=None, num_epochs=100, 
-          problem='classification', scheduler=None, verbose=True,
-          use_attention=False):
+          scheduler=None, verbose=True):
     """ 
     Train classification/regression model.
         Parameters:
@@ -50,24 +56,22 @@ def train(model, criterion, optimizer, dataloaders, transforms,
             log_interval (int): 
             summary_writer (TensorboardX): to register values into tensorboard
             num_epochs (int): number of epochs of the training
-            problem (str): if it is a classification or regresion problem
             verbose (bool): whether or not to display metrics during training
-            use_attention (bool): 
         Returns:
             train_results (dict): dictionary containing the labels, predictions,
                                  probabilities and accuracy of the model on the dataset.
     """
-    best_acc = 0.0
+
     best_epoch = 0
     best_loss = np.inf
     best_outputs = {'train': [], 'val': {}}
-    acc_array = {'train': [], 'val': []}
     loss_array = {'train': [], 'val': []}
+    CIs = {'train': [], 'val':[]}
     
     global_summary_step = {'train': 0, 'val': 0}
 
     # Creates once at the beginning of training
-    scaler = torch.cuda.amp.GradScaler()
+    # scaler = torch.cuda.amp.GradScaler()
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
@@ -79,67 +83,66 @@ def train(model, criterion, optimizer, dataloaders, transforms,
 
         for phase in ['train', 'val']:
             if phase == 'train':
-                    model.train()
+                model.train()
             else:
-                    model.eval()
+                model.eval()
 
             running_loss = 0.0
-            if problem == 'classification' or problem == 'ordinal':
-                running_corrects = 0.0
             summary_step = global_summary_step[phase]
             # for logging tensorboard
             last_running_loss = 0.0
-            if problem == 'classification' or problem=='ordinal':
-                last_running_corrects = 0.0
+
+            # for CI tracking
+            output_list = []
+            vital_status_list = []
+            survival_months_list = []
+
             for batch in tqdm(dataloaders[phase]):
+
+                vital_status_list.append(batch[1].numpy().flatten())
+                survival_months_list.append(batch[2].numpy().flatten())
+
                 wsi = batch[0]
-                labels = batch[1]
+                survival_months = batch[1]
+                status = batch[2] 
+
                 size = wsi.size(0)
 
-                if problem == 'classification':
-                    labels = labels.flatten()
-                labels = labels.to(device)
+                survival_months = survival_months.to(device)
+                status = status.to(device)
+
                 wsi = wsi.to(device)
                 wsi = transforms[phase](wsi)
+
                 optimizer.zero_grad()
+                
                 with torch.set_grad_enabled(phase=='train'):
                     # Casts operations to mixed precision
-                    with torch.cuda.amp.autocast():
-                        if use_attention:
-                            outputs = model(wsi)
-                        else:
-                            outputs = model(wsi)
-                        # saving running outputs
-                        running_outputs[phase].append(outputs.detach().cpu().numpy())
-                        running_labels[phase].append(labels.cpu().numpy())
-                        if problem == 'classification':
-                            _, preds = torch.max(outputs,1)
-                            
-                            loss = criterion(outputs, labels)
-                        elif problem == 'regression':
-                            loss = criterion(outputs, labels.view(labels.size(0), 1))
-                        elif problem == 'ordinal':
-                            _, preds = torch.max(outputs,1)
-                            loss = criterion(outputs, labels.view(labels.size(0), 1))
+                    #with torch.cuda.amp.autocast():
+                    outputs = model(wsi)
+                    output_list.append(outputs.detach().cpu().numpy().flatten())
+                    # saving running outputs
+                    running_outputs[phase].append(outputs.detach().cpu().numpy())
+                    running_labels[phase].append(status.cpu().numpy())
+
+                    loss = criterion(outputs, survival_months.view(survival_months.size(0)), status.view(status.size(0)))
 
                     if phase == 'train':
                         # Scales the loss, and calls backward()
                         # to create scaled gradients
-                        scaler.scale(loss).backward()
+                        loss.backward()
                         
                         # Unscales gradients and calls
-                        # or skips optimizer.step()
-                        scaler.step(optimizer)
+                        optimizer.step()
+                        # scaler.step(optimizer)
                         
                         # Updates the scale for next iteration
-                        scaler.update()
+                        # scaler.update()
                         if scheduler is not None:
                             scheduler.step()
 
                 summary_step += 1
                 running_loss += loss.item() * wsi.size(0)
-                if problem == 'classification' or problem == 'ordinal':
-                    running_corrects += torch.sum(preds == labels)
                 sizes[phase] += size
                 inputs_seen[phase] += size
 
@@ -148,68 +151,62 @@ def train(model, criterion, optimizer, dataloaders, transforms,
                 loss = loss.detach()
                 torch.cuda.empty_cache()
 
-                if (summary_step % log_interval == 0):
+                if ((summary_step % log_interval == 0) & (summary_step > log_interval)) | (summary_step == 0):
                     loss_to_log = (running_loss - last_running_loss) / inputs_seen[phase]
-                    if problem == 'classification' or problem == 'ordinal':
-                        acc_to_log = (running_corrects - last_running_corrects) / inputs_seen[phase]
 
                     if summary_writer is not None:
                         summary_writer.add_scalar("{}/loss".format(phase), loss_to_log, summary_step)
-                        if problem == 'classification' or 'problem' == 'ordinal':
-                            summary_writer.add_scalar("{}/acc".format(phase), acc_to_log, summary_step)
 
                     last_running_loss = running_loss
-                    if problem == 'classification' or problem == 'ordinal':
-                        last_running_corrects = running_corrects
                     inputs_seen[phase] = 0.0
 
-        global_summary_step[phase] = summary_step
-        epoch_loss = running_loss / sizes[phase]
-        if problem == 'classification' or problem == 'ordinal':
-            epoch_acc = running_corrects / sizes[phase]
+            global_summary_step[phase] = summary_step
+            epoch_loss = running_loss / sizes[phase]
 
-        loss_array[phase].append(epoch_loss)
-        if problem == 'classification' or problem == 'ordinal':
-            acc_array[phase].append(epoch_acc)
+            loss_array[phase].append(epoch_loss)
 
-        if verbose:
-            if problem == 'classification' or problem == 'ordinal':
-                print('{} Loss: {:.4f} Acc: {:.4f}'.format(
-                        phase, epoch_loss, epoch_acc))
-            else:
-                print('{} Loss: {:.4f}'.format(
-                        phase, epoch_loss))
+            # CI index
+            output_list = np.concatenate(output_list, axis=0)
+            survival_months_list = np.concatenate(survival_months_list, axis=0)
+            vital_status_list = np.concatenate(vital_status_list, axis=0)
+            CI = get_survival_CI(output_list, survival_months_list, vital_status_list)
+            CIs[phase].append(CI)
+
+            if summary_writer is not None:
+                summary_writer.add_scalar("{}/CI".format(phase), CI, epoch)
+
+            if summary_writer is not None:
+                summary_writer.add_scalar("{}/loss".format(phase), epoch_loss, epoch)
+
+            print('{} Loss: {:.4f}, CI: {:.4f}'.format(phase, epoch_loss, CI))
         
-        if phase == 'val' and epoch_loss < best_loss:
-            if problem == 'classification' or problem == 'ordinal':
-                best_acc = epoch_acc
-            best_loss = epoch_loss
-            torch.save(model.state_dict(), os.path.join(save_dir, 'model_dict_best.pt'))
-            best_epoch = epoch
-            best_outputs['val'] = running_outputs['val']
-            best_outputs['train'] = running_outputs['train']
+            if phase == 'val' and epoch_loss < best_loss:
 
-    torch.save(model.state_dict(), os.path.join(save_dir, 'model_last.pt'))
+                best_loss = epoch_loss
+                torch.save(model.state_dict(), os.path.join(save_dir, 'model_dict_best.pt'))
+                best_epoch = epoch
+                best_outputs['val'] = running_outputs['val']
+                best_outputs['train'] = running_outputs['train']
+
+    #torch.save(model.state_dict(), os.path.join(save_dir, 'model_last.pt'))
     
     model.load_state_dict(torch.load(os.path.join(save_dir, 'model_dict_best.pt')))
-
+    
     results = {
             'best_epoch': best_epoch,
             'best_loss': best_loss,
-            'best_outputs_val': best_outputs['val'],
-            'best_outputs_train': best_outputs['train'],
-            'labels_val': running_labels['val'],
-            'labels_train': running_labels['train']
+            'best_outputs_val': np.array(best_outputs['val']).flatten(),
+            'best_outputs_train': np.array(best_outputs['train']).flatten(),
+            'labels_val': np.array(running_labels['val']).flatten(),
+            'labels_train': np.array(running_labels['train']).flatten(),
+            'best_CI_train':CIs['train'][best_epoch],
+            'best_CIs_val':CIs['val'][best_epoch]
         }
-
-    if problem == 'classification' or problem == 'ordinal':
-        results['best_acc'] =  best_acc
 
     return model, results
 
 def evaluate(model, dataloader, dataset_size, transforms, criterion,
-             device='cpu', problem='classification', verbose=True,
-             use_attention=False):
+             device='cpu', verbose=True):
     """ 
     Evaluate classification model on test set
         Parameters:
@@ -218,70 +215,56 @@ def evaluate(model, dataloader, dataset_size, transforms, criterion,
             dataset_size (int): Size of the dataset.
             transforms (torch.nn.Sequential): Transforms to be applied to the data
             device (str): Device to move the data to. Default: cpu.
-            problem (str): if it is a classification or regresion problem
             verbose (bool): whether or not to display metrics at the end
-            use_attention (bool): whether to use the attention of not
         Returns:
             test_results (dict): dictionary containing the labels, predictions,
                                  probabilities and accuracy of the model on the dataset.
     """
     model.eval()
 
-    corrects = 0
-    predictions = []
     probabilities = []
-    real = []
+    status_all = []
+    survival_months_all = []
     losses = []
+
     for batch in tqdm(dataloader):        
         wsi = batch[0]
-        labels = batch[1]
+        survival_months = batch[1]
+        status = batch[2]
+
+        status_all.append(status)
+        survival_months_all.append(survival_months)
         
-        labels = labels.flatten()
-        labels = labels.to(device)
+        survival_months = survival_months.flatten().to(device)
+        status = status.flatten().to(device)
 
         wsi = wsi.to(device)
         wsi = transforms(wsi)
         with torch.set_grad_enabled(False):
-            if use_attention:
-                outputs = model(wsi)
-            else:
-                outputs = model(wsi)
+            outputs = model(wsi)
 
-            if problem == 'classification':
-                _, preds = torch.max(outputs, 1)
-                
-                loss = criterion(outputs, labels)
-            elif problem == 'regression':
-                loss = criterion(outputs, labels.view(labels.size(0), 1))
-            elif problem == 'ordinal':
-                 _, preds = torch.max(outputs, 1)
-                 loss = criterion(outputs, labels.view(labels.size(0), 1))
-    
-        if problem == 'classification' or problem == 'ordinal':
-            predictions.append(preds.detach().to('cpu').numpy())
-            corrects += torch.sum(preds == labels)
+        loss = criterion(outputs, survival_months.view(survival_months.size(0)), status.view(status.size(0)))
+
         probabilities.append(outputs.detach().to('cpu').numpy())
-        real.append(labels.detach().to('cpu').numpy())
         losses.append(loss.detach().item())
 
-    if problem == 'classification' or problem == 'ordinal':
-        accuracy = corrects / dataset_size
-    predictions = np.concatenate([predictions], axis=0, dtype=object)
-    probabilities = np.concatenate([probabilities], axis=0, dtype=object)
-    real = np.concatenate([real], axis=0, dtype=object)
-    if (problem == 'classification' or problem == 'ordinal') and verbose:
-        print('Accuracy of the model {}'.format(accuracy))
-    else:
-        print('Loss of the model {}'.format(np.mean(losses)))
-    
+    probabilities = np.concatenate(probabilities, axis=0).flatten()
+    status_all = np.concatenate(status_all, axis=0)
+    survival_months_all = np.concatenate(survival_months_all, axis=0)
+
+    print('Loss of the model {}'.format(np.mean(losses)))
+
+    # import pdb; pdb.set_trace()
+    CI = get_survival_CI(probabilities, survival_months_all, status_all)
+    print('CI of the model {}'.format(CI))
+
     test_results = {
         'outputs': probabilities,
-        'real': real
+        'status': status_all,
+        'losses': losses,
+        'survival_months':survival_months_all,
+        'CI':CI
     }
-
-    if problem == 'classification' or problem == 'ordinal':
-        test_results['accuracy'] = accuracy.detach().to('cpu').numpy()
-        test_results['predictions'] = predictions
 
     return test_results
 
@@ -296,7 +279,7 @@ if __name__ == "__main__":
             help='Flag to use for saving the checkpoints')
     parser.add_argument('--seed', type=int, default=99,
             help='Seed for random generation')
-    parser.add_argument('--log', type=int, default=0,
+    parser.add_argument('--log', type=int, default=1,
             help='Use tensorboard for experiment logging')
     parser.add_argument('--parallel', type=int, default=0,
             help='Use DataParallel training')
@@ -306,11 +289,12 @@ if __name__ == "__main__":
                         help='Bag size to use')
     parser.add_argument('--max_patch_per_wsi', type=int, default=100,
                         help='Maximum number of paches per wsi')
+    parser.add_argument('--num_samples', type=int, default=None,
+                        help='Number of samples from training set')
+    parser.add_argument('--seeds', type=str, default=None,
+                        help='Random seeds, separated by comma')
 
     args = parser.parse_args()
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     with open(args.config) as f:
         config = json.load(f)
@@ -319,128 +303,189 @@ if __name__ == "__main__":
     print('Config for this experiment \n')
     print(config)
     print(10*'-')
-    
-    path_csv = config['path_csv']
-    patch_data_path = config['patch_data_path']
-    img_size = config['img_size']
-    max_patch_per_wsi = config['max_patch_per_wsi']
-    rna_features = config['rna_features']
-    quick = config.get('quick', None)
-    bag_size = config.get('bag_size', 40)
-    batch_size = config.get('batch_size', 64)
 
     if 'flag' in config:
         args.flag = config['flag']
     else:
         args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
 
-    if not os.path.exists(config['save_dir']):
-        os.mkdir(config['save_dir'])
+    # get config values
+    path_csv = config['path_csv']
+    patch_data_path = config['patch_data_path']
+    img_size = config['img_size']
+    max_patch_per_wsi = config['max_patch_per_wsi']
+    quick = config.get('quick', None)
+    bag_size = config.get('bag_size', 40)
+    batch_size = config.get('batch_size', 64)
 
+    # from args
+    num_samples = args.num_samples
+    seeds = args.seeds
+
+    # set num_epochs
+    if (num_samples == 5) | (num_samples == 10):
+        num_epochs = 10
+    elif num_samples == 20:
+        num_epochs = 15
+    elif num_samples == 150:
+        num_epochs = 20
+
+    # specify transforms
     transforms_ = transforms.Compose([
-    transforms.ColorJitter(64.0 / 255, 0.75, 0.25, 0.04),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-
-    transforms_val = transforms.Compose([
-        transforms.ToTensor(),
+        transforms.ConvertImageDtype(torch.float),      
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.ColorJitter(64.0 / 255, 0.75, 0.25, 0.04),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
-    print('Loading dataset...')
+    transforms_val = transforms.Compose([
+        transforms.ConvertImageDtype(torch.float),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
-    df = pd.read_csv(path_csv)
+    transforms_trainval = {'train': transforms_, 'val': transforms_val}
 
-    # here we can decide what to use as label, maybe the status
-    train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['Labels'], random_state=args.seed)
+    if not os.path.exists(args.save_dir):
+            os.mkdir(args.save_dir)
 
-    train_df, val_df = train_test_split(train_df, test_size=0.2, stratify=train_df['Labels'], random_state=args.seed)
+    for seed in [int(i) for i in seeds.split(",")]: #[0,42,2022,72,273,61,9,99,86,54]:
 
-    train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
-                         max_patch_per_wsi=max_patch_per_wsi,
-                         bag_size=bag_size,
-                         transforms=transforms_, quick=quick)
-    val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
-                            max_patch_per_wsi=max_patch_per_wsi,
+        save_dir = args.save_dir+'_'+str(seed)
+
+        # set bool for pretraining based on mode
+        mode = save_dir.split('/')[-2]
+        if 'dir' in mode:
+            direct = 1
+        elif ('ssl' in mode) or ('im' in mode):
+            direct = 0
+        else:
+            print('Wrong save_dir format')
+            exit()
+        
+        # set checkpoint
+        if 'ssl' in mode:
+            checkpoint = '/home/users/mpizuric/code/SSL-Survival/checkpoints/ssl_training/wsi_encoder.pt'
+        else:
+            checkpoint = None
+
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        print('Loading dataset...')
+
+        df = pd.read_csv(path_csv)
+
+        # datasets and dataloaders
+        train_df, test_df = train_test_split(df, test_size=0.2, random_state=seed)
+
+        train_df, val_df = train_test_split(train_df, test_size=0.2, random_state=seed)
+
+        train_dataset = PatchBagDataset(patch_data_path, train_df, img_size,
+                            max_patches_total=max_patch_per_wsi,
                             bag_size=bag_size,
-                            transforms=transforms_val, quick=quick)
+                            transforms=transforms_, quick=quick, num_samples=num_samples)
 
-    test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
-                            max_patch_per_wsi=max_patch_per_wsi,
-                            bag_size=bag_size,
-                            transforms=transforms_val, quick=quick)
+        val_dataset = PatchBagDataset(patch_data_path, val_df, img_size,
+                                max_patches_total=max_patch_per_wsi,
+                                bag_size=bag_size,
+                                transforms=transforms_val, quick=0)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
-                num_workers=config['n_workers'], pin_memory=True, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
-    pin_memory=True, shuffle=False)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
-    num_workers=config['n_workers'], pin_memory=True, shuffle=False)
+        test_dataset = PatchBagDataset(patch_data_path, test_df, img_size,
+                                max_patches_total=max_patch_per_wsi,
+                                bag_size=bag_size,
+                                transforms=transforms_val, quick=0)
 
-    dataloaders = {
-            'train': train_dataloader,
-            'val': val_dataloader}
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
+                    num_workers=config['n_workers'], pin_memory=True, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
+                    pin_memory=True, shuffle=False)
+        test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
+                    num_workers=config['n_workers'], pin_memory=True, shuffle=False)
 
-    dataset_sizes = {
-            'train': len(train_dataset),
-            'val': len(val_dataset)
-            }
+        dataloaders = {
+                'train': train_dataloader,
+                'val': val_dataloader}
 
-    print('Finished loading dataset and creating dataloader')
+        dataset_sizes = {
+                'train': len(train_dataset),
+                'val': len(val_dataset)
+                }
 
-    print('Initializing models')
+        print('Finished loading dataset and creating dataloader')
 
-    wsi_encoder = resnet50(pretrained=True)
+        print('Initializing models')
 
-    layers_to_train = [wsi_encoder.fc, wsi_encoder.layer4, wsi_encoder.layer3]
-    for param in wsi_encoder.parameters():
-        param.requires_grad = False
-    for layer in layers_to_train:
-        for n, param in layer.named_parameters():
-            param.requires_grad = True
+        wsi_encoder = resnet18(pretrained=bool(1-direct))
 
-    model = AggregationModel(wsi_encoder)
+        # if pretrain (from imagenet or SSL) --> freeze specified layers, else retrain everything
+        if direct == 0:
+            layers_to_train = [wsi_encoder.fc] 
+            if config['retrain_l3']:
+                layers_to_train.append(wsi_encoder.layer3) 
+            if config['retrain_l4']:
+                layers_to_train.append(wsi_encoder.layer4) 
+                
+            for param in wsi_encoder.parameters():
+                param.requires_grad = False
+            for layer in layers_to_train:
+                for n, param in layer.named_parameters():
+                    param.requires_grad = True
 
-    if args.checkpoint is not None:
-        print('Restoring from checkpoint')
-        print(args.checkpoint)
-        model.load_state_dict(torch.load(args.checkpoint))
-        print('Loaded model from checkpoint')
+        model = AggregationModel(wsi_encoder, resnet_dim=512, n_outputs=1)
+        model.cox_regression_layer.apply(init_weights_xavier)
 
+        #import pdb; pdb.set_trace()
+        if checkpoint is not None:
+            print('Restoring from checkpoint')
+            print(checkpoint)
+            model.resnet.load_state_dict(torch.load(checkpoint))
+            print('Loaded model from checkpoint')
 
-    #model = model.cuda(config['device'])
-    model = nn.DataParallel(model)
-    model.cuda()
+        # model on gpu
+        model = model.to(config['device'])
 
-    # add optimizer
+        # learning rate and optimizer
+        lr = config.get('lr', 3e-3)
 
-    lr = config.get('lr', 3e-3)
+        if direct == 0:
+            # optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+            optimizer = AdamW([{'params': model.resnet.layer4.parameters(), 'lr': 1e-5}, \
+                                {'params': model.resnet.layer3.parameters(), 'lr': 3e-7}], \
+                                weight_decay = config['weights_decay'], lr=lr)
+        else:
+            optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
 
-    optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+        # add loss function
+        criterion = CoxLoss() 
 
-    # add loss function
-    # loss function in this shit
-    criterion = nn.CrossEntropyLoss()
+        # train model
+        if args.log:
+            summary_writer = SummaryWriter(
+                    os.path.join(save_dir,
+                        datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
 
-    # train model
+            summary_writer.add_text('config', str(config))
+        else:
+            summary_writer = None
 
-    if args.log:
-        summary_writer = SummaryWriter(
-                os.path.join(config['summary_path'],
-                    datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S") + "_{0}".format(args.flag)))
+        model, results = train(model, criterion, optimizer, dataloaders,
+                    save_dir=save_dir,
+                    device=config['device'], 
+                    log_interval=config['log_interval'],
+                    summary_writer=summary_writer,
+                    num_epochs=num_epochs,
+                    transforms=transforms_trainval)
 
-        summary_writer.add_text('config', str(config))
-    else:
-        summary_writer = None
+        # test on test set
+        test_predictions = evaluate(model, test_dataloader, len(test_dataset), \
+                                    transforms_val, criterion,device=config['device'], \
+                                    verbose=True)
 
-    model, results = train(model, criterion, optimizer, dataloaders,
-                save_dir=config['save_dir'],
-                device=config['device'], log_interval=config['log_interval'],
-                summary_writer=summary_writer,
-                num_epochs=config['num_epochs'])
+        # save results
+        with open(save_dir+'test_predictions.pkl', 'wb') as f:
+            pickle.dump(test_predictions, f)
 
-    # test on test set
-
-    test_predictions = evaluate(model, test_dataloader, len(test_dataset),device=config['device'])
-
-    np.save(config['save_dir']+'test_predictions.npy', test_predictions)
-    # save results
+        with open(save_dir+'results.pkl', 'wb') as f:
+            pickle.dump(results, f)

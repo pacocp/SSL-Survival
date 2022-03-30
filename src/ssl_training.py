@@ -47,7 +47,7 @@ def train_SSL(model, criterion, optimizer, dataloaders,
             last_running_loss = 0.0
             last_running_corrects = 0.0
             last_time = time.time()
-            for b_idx, batch in tqdm(enumerate(dataloaders[phase])):
+            for b_idx, batch in enumerate(dataloaders[phase]):
                 #batch, labels = permutate_batch(batch, bag)
                 labels = batch['labels']
                 labels = labels.to(device)
@@ -124,6 +124,7 @@ def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None):
 
     corrects = 0
     predictions = []
+
     real_labels = []
     for batch in tqdm(dataloader):
         labels = batch['labels']

@@ -32,8 +32,7 @@ def decompress_and_deserialize(lmdb_value: Any):
 
 class PatchBagDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None, bag_size=40,
-            max_patches_total=300, quick=False, label_encoder=None, ordinal=False, 
-            type='classification'):
+            max_patches_total=300, quick=False, num_samples=20):
         self.patch_data_path = patch_data_path
         self.csv_path = csv_path
         self.img_size = img_size
@@ -41,11 +40,9 @@ class PatchBagDataset(Dataset):
         self.bag_size = bag_size
         self.max_patches_total = max_patches_total
         self.quick = quick
-        self.le = label_encoder
-        self.ordinal = ordinal
-        self.type = type
         self.index = []
         self.data = {}
+        self.num_samples = num_samples
         self._preprocess()
 
     def _preprocess(self):
@@ -55,28 +52,24 @@ class PatchBagDataset(Dataset):
             csv_file = self.csv_path
         
         if self.quick:
-            csv_file = csv_file.sample(150)
+            csv_file = csv_file.sample(self.num_samples)
         
         for i, row in tqdm(csv_file.iterrows()):
             row = row.to_dict()
+
+            # get WSI and labels
             WSI = row['wsi_file_name']
-            label = np.asarray(row['Labels'])
-            if self.le is not None:
-                label = self.le.transform(label.reshape(-1,1))
-                if self.type == 'regression':
-                    label = label.astype(np.float32)
-            else:
-                if self.ordinal:
-                    label = label.astype(np.int64)
-                else:
-                    label = label.astype(np.float32)
+            survival_months = row['survival_months']
+            status = row['status']
 
             project = row['tcga_project'] 
-            if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)):
+
+            if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)): 
                 print('Not exist {}'.format(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)))
                 continue
             
-            #try:
+            # get patches and keys from lmdb
+
             path = os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
             try:
                 lmdb_connection = lmdb.open(path,
@@ -97,17 +90,19 @@ class PatchBagDataset(Dataset):
             except Exception as e:
                 print(e)
                 continue
-            #except:
-            #    print('Error with lmdb file {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
-            #    continue
+
+            # fill self.data 
             n_selected = min(n_patches, self.max_patches_total)
             n_patches= list(range(n_patches))
             images = random.sample(n_patches, n_selected)
             self.data[WSI] = {w.lower(): row[w] for w in row.keys()}
             self.data[WSI].update({'WSI': WSI, 'images': images, 'n_images': len(images), 
                                    'lmdb_path': path, 'keys': keys})
+
+            # fill self.index
             for k in range(len(images) // self.bag_size):
-                self.index.append((WSI, self.bag_size * k, label))
+                self.index.append((WSI, self.bag_size * k, survival_months, status))
+            #import pdb; pdb.set_trace()
 
     def shuffle(self):
         for k in self.data.keys():
@@ -127,7 +122,8 @@ class PatchBagDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
-        (WSI, i, label) = self.index[idx]
+
+        (WSI, i, survival_months, status) = self.index[idx]
         imgs = []
         row = self.data[WSI]
         lmdb_connection = lmdb.open(row['lmdb_path'],
@@ -140,7 +136,7 @@ class PatchBagDataset(Dataset):
                 imgs.append(img)
 
         img = torch.stack(imgs, dim=0)
-        return img, label
+        return img, survival_months, status
 
 class PatchDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None,
