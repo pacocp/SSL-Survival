@@ -1,1 +1,1 @@
-# Self-supervised pre-training for lung adenocarcinoma overall survival prediction
+# Self-supervised multimodal pre-training for lung adenocarcinoma overall survival prediction
