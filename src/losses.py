@@ -11,13 +11,22 @@ def cox_loss(cox_scores, times, status):
     :return: loss of size 1, the sum of cox losses for the batch
     '''
 
+    # yj >= yi
     times, sorted_indices = torch.sort(-times)
+
+    # z*beta
     cox_scores = cox_scores[sorted_indices]
     status = status[sorted_indices]
+
+    # why?
     cox_scores = cox_scores -torch.max(cox_scores)
+
+    # z*beta - log(sum(exps))
     exp_scores = torch.exp(cox_scores)
     loss = cox_scores - torch.log(torch.cumsum(exp_scores, dim=0)+1e-5)
-    loss = - loss * status
+
+    # only consider uncensored
+    loss = - loss * status 
     # TODO maybe divide by status.sum()
 
     if (loss != loss).any():
@@ -34,17 +43,6 @@ class CoxLoss(nn.Module):
         return cox_loss(cox_scores,times,status)
 
 def get_survival_CI(output_list, survival_months, vital_status):
-    import numpy as np
-    sorted_indices = np.argsort(-survival_months)
-    survival_months = survival_months[sorted_indices]
-    output_list = output_list[sorted_indices]
-    vital_status = vital_status[sorted_indices]
-
     CI = concordance_index(survival_months, -output_list, vital_status)
 
     return CI
-
-def brier_score(cox_scores, times, status):
-    times, sorted_indices = torch.sort(-times)
-    cox_scores = cox_scores[sorted_indices]
-    status = status[sorted_indices]

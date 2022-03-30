@@ -48,9 +48,6 @@ def train_SSL(model, criterion, optimizer, dataloaders,
             last_running_corrects = 0.0
             last_time = time.time()
             for b_idx, batch in enumerate(dataloaders[phase]):
-                if b_idx != 0:
-                    end = time.time()
-                    print('Batch loading time {}'.format(end-start))
                 #batch, labels = permutate_batch(batch, bag)
                 labels = batch['labels']
                 labels = labels.to(device)
@@ -134,6 +131,7 @@ def evaluate_SSL(model, dataloader, dataset_size, bag=True, device=None, transfo
 
     corrects = 0
     predictions = []
+
     real_labels = []
     for batch in dataloader:
         labels = batch['labels']
