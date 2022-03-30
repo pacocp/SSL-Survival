@@ -14,6 +14,7 @@ def create_ssl_csv(csv_path: str):
     data = pd.read_csv(csv_path)
     
     wsi = data['wsi_file_name'].values
+    tcga_project = data['tcga_project'].values
     range_values = list(range(len(wsi)))
     values_wsi = random.sample(range_values, int(0.5*len(wsi)))
     
@@ -28,9 +29,14 @@ def create_ssl_csv(csv_path: str):
             continue
         idx1 = pair[0]
         idx2 = pair[1]
+        # change wsi
         aux = wsi[idx1]
         wsi[idx1] = wsi[idx2]
         wsi[idx2] = aux
+        # change tcga_project
+        aux = tcga_project[idx1]
+        tcga_project[idx1] = tcga_project[idx2]
+        tcga_project[idx2] = aux
 
     print('{}/{}'.format(errors, total))
     labels = np.zeros(len(wsi), dtype=np.int64)
@@ -38,6 +44,7 @@ def create_ssl_csv(csv_path: str):
     labels[values_wsi] = 1
 
     data['wsi_file_name'] = wsi
+    data['tcga_project'] = tcga_project
     data['Labels'] = labels
 
     data.to_csv('pancancer_data_SSL.csv', index=False)

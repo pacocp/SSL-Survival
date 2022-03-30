@@ -4,7 +4,6 @@ import pickle
 
 import numpy as np
 from torch.utils.data import Dataset
-from torchvision.io import read_image
 import pandas as pd
 from PIL import Image
 import torch
@@ -30,84 +29,6 @@ def decompress_and_deserialize(lmdb_value: Any):
     image = np.copy(image)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return torch.from_numpy(image).permute(2,0,1)
-
-class PatchBagRNADataset(Dataset):
-    def __init__(self, patch_data_path: str, rna_csv_path: str, img_size:int , 
-                    transforms=None, max_patch_per_wsi=400, bag_size=20,
-                    quick=None, labels=False):
-        self._patch_data_path = patch_data_path
-        self._rna_csv_path = rna_csv_path
-        self._img_size = img_size
-        self.bag_size = bag_size
-        self._transforms = transforms
-        self._max_patch_per_wsi = max_patch_per_wsi
-        self._quick = quick
-        self._labels = labels
-        self.data = {}
-        self.index = []
-        self._preprocess()
-
-    def _preprocess(self):
-        self.data, self.index = get_data_rna_bag_wsi(self._rna_csv_path,
-                self._patch_data_path, self._max_patch_per_wsi, self.bag_size,
-                self._quick, self._labels)
-
-    def __len__(self):
-        return len(self.index)
-    
-    def __getitem__(self, idx):
-        (WSI, i) = self.index[idx]
-        imgs = []
-        item = self.data[WSI].copy()
-        for patch in item['images'][i:i + self.bag_size]:
-            with open(patch, 'rb') as f:
-                img = Image.open(f).convert('RGB')
-            if self._transforms is not None:
-                img = self._transforms(img)
-            imgs.append(img)
-        img = torch.stack(imgs,dim=0)
-        item['patch_bag'] = img
-        return item
-
-def get_data_rna_bag_wsi(csv_path, patch_path:str , limit: int, bag_size: int, quick=None, labels=False):
-    dataset = {}
-    index = []
-    if type(csv_path) == str:
-        data = pd.read_csv(csv_path)
-    else:
-        data = csv_path
-    
-    if quick is not None:
-        data = data.loc[data['wsi_file_name'].isin(quick)]
-
-    for _, row in tqdm(data.iterrows()):
-        WSI = row['wsi_file_name']
-        rna_data = row[[x for x in row.keys() if 'rna_' in x]].values.astype(np.float32)
-        rna_data = torch.tensor(rna_data, dtype=torch.float32)
-        label = row['Labels']
-        label = torch.tensor(label, dtype=torch.int64)
-
-        new_row = dict()
-        new_row['WSI'] = WSI
-        new_row['rna_data'] = rna_data
-        new_row['label'] = label
-    
-        n_patches = sum(1 for _ in open(os.path.join(patch_path, WSI, 'loc.txt'))) - 2
-        images = [os.path.join(patch_path, WSI, WSI + "_patch_{}.jpeg".format(i)) for i in
-                  range(n_patches)]
-
-        if limit is not None:
-            images = images[:limit]
-        new_row['images'] = images
-        new_row['n_images'] = len(images)
-        
-        dataset[WSI] = {}
-        dataset[WSI] = {w.lower(): new_row[w] for w in new_row.keys()}
-
-        for k in range(len(images) // bag_size):
-            index.append((WSI, bag_size * k))
-
-    return dataset, index
 
 class PatchBagDataset(Dataset):
     def __init__(self, patch_data_path, csv_path, img_size, transforms=None, bag_size=40,
@@ -142,11 +63,13 @@ class PatchBagDataset(Dataset):
             status = row['status']
 
             project = row['tcga_project'] 
+
             if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)): 
                 print('Not exist {}'.format(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)))
                 continue
             
             # get patches and keys from lmdb
+
             path = os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
             try:
                 lmdb_connection = lmdb.open(path,
@@ -357,19 +280,18 @@ class PatchRNADataset(Dataset):
             WSI = row['wsi_file_name']
             rna_data = row[[x for x in row.keys() if 'rna_' in x]].values.astype(np.float32)
             rna_data = torch.tensor(rna_data, dtype=torch.float32)
-            data_path = row['patch_data_path']
-            label = np.asarray(row['labels'])
+            label = np.asarray(row['Labels'])
             if self.le is not None:
                 label = self.le.transform(label.reshape(-1,1))
-            label = torch.tensor(label, dtype=torch.float32)
+            label = torch.tensor(label, dtype=torch.int64)
             #label = label.flatten()
             project = row['tcga_project'] 
-            if not os.path.exists(os.path.join('../'+project+self.patch_data_path, WSI)):
-                print('Not exist {}'.format(os.path.join('../'+project+self.patch_data_path, WSI)))
+            if not os.path.exists(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)):
+                print('Not exist {}'.format(os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI)))
                 continue
             
             #try:
-            path = os.path.join('../'+project+self.patch_data_path, WSI, WSI)
+            path = os.path.join('/oak/stanford/groups/ogevaert/data/Roche-TCGA/'+project+self.patch_data_path, WSI, WSI)
             try:
                 lmdb_connection = lmdb.open(path,
                                             subdir=False, readonly=True, 
@@ -426,7 +348,7 @@ class PatchRNADataset(Dataset):
             }
         else:
             out = {
-                'image': self.transforms(image),
+                'image': image,
                 'rna_data': rna_data,
                 'labels': self.labels[idx]
             }
@@ -434,42 +356,46 @@ class PatchRNADataset(Dataset):
         #return read_image(self.images[idx]), self.labels[idx]
 
 class RNADataset(Dataset):
-    def __init__(self, csv_path, quick=False):
-        self._csv_path = csv_path
+    def __init__(self, csv_path, quick=False, num_samples=20, le=None, seed=99):
+        self.csv_path = csv_path
         self.data = None
         self.quick = quick
+        self.num_samples = num_samples
+        self.rna_data = []
+        self.vital_status = []
+        self.survival_months = []
+        self.le = le
+        self.labels = []
+        self.seed = seed
         self._preprocess()
 
     def _preprocess(self):
-        self.data = get_data_rna(self._csv_path, self.quick)
+        if type(self.csv_path) == str:
+            csv_file = pd.read_csv(self.csv_path)
+        else:
+            csv_file = self.csv_path
+        
+        if self.quick:
+            csv_file = csv_file.sample(self.num_samples, random_state=self.seed)
+        
+        rna_columns = [x for x in csv_file.columns if 'rna_' in x]
+        if self.le != None:
+            self.labels = csv_file['tcga_project'].values
+            self.labels = self.le.transform(self.labels.reshape(-1,1))
+            self.labels = torch.tensor(self.labels, dtype=torch.int64)
+        self.rna_data = csv_file[rna_columns].values.astype(np.float32)
+        self.rna_data = torch.tensor(self.rna_data, dtype=torch.float32)
+        self.vital_status = csv_file['status'].values.astype(np.float32)
+        self.vital_status = torch.tensor(self.vital_status, dtype=torch.float32)
+        self.survival_months = csv_file['survival_months'].values.astype(np.float32)
+        self.survival_months = torch.tensor(self.survival_months, dtype=torch.float32)
 
     def __len__(self):
-        return len(self.data)
+        return len(self.rna_data)
     
     def __getitem__(self, idx):
-        return self.data[idx]
+        return self.rna_data[idx], self.vital_status[idx], self.survival_months[idx]
 
-
-def get_data_rna(csv_paths, quick=False):
-    dataset = []
-    for csv_path in csv_paths:
-        if type(csv_path) == str:
-            print('Working with dataset {}'.format(csv_path))
-            data = pd.read_csv(csv_path)
-        else:
-            data = csv_path
-
-        if quick:
-            data = data.sample(10)
-
-        for _, row in tqdm(data.iterrows()):
-            rna_data = row[[x for x in row.keys() if 'rna_' in x]].values.astype(np.float32)
-            rna_data = torch.tensor(rna_data, dtype=torch.float32)
-
-            item = {'rna_data': rna_data}
-            dataset.append(item)
-
-    return dataset
 
 def normalize_dfs(train_df, val_df, test_df, labels=False, norm_type='standard'):
     def _get_log(x):
@@ -479,17 +405,16 @@ def normalize_dfs(train_df, val_df, test_df, labels=False, norm_type='standard')
     # get list of columns to scale
     rna_columns = [x for x in train_df.columns if 'rna_' in x]
     
-    
     # log transform
     train_df[rna_columns] = train_df[rna_columns].apply(_get_log)
     val_df[rna_columns] = val_df[rna_columns].apply(_get_log)
     test_df[rna_columns] = test_df[rna_columns].apply(_get_log)
     
-    
-    train_df = train_df[rna_columns+['wsi_file_name']]
-    val_df = val_df[rna_columns+['wsi_file_name']]
-    test_df = test_df[rna_columns+['wsi_file_name']]
-    
+    '''
+    train_df = train_df[rna_columns+rest_columns]
+    val_df = val_df[rna_columns+rest_columns]
+    test_df = test_df[rna_columns+['wsi_file_name']+['Labels']]
+    '''
     rna_values = train_df[rna_columns].values
 
     if norm_type == 'standard':

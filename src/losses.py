@@ -42,7 +42,6 @@ class CoxLoss(nn.Module):
     def forward(self,cox_scores,times,status):
         return cox_loss(cox_scores,times,status)
 
-
 def get_survival_CI(output_list, survival_months, vital_status):
 
     CI = concordance_index(survival_months, -output_list, vital_status)

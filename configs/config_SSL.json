@@ -8,7 +8,7 @@
     "lr": 5e-3,
     "num_epochs": 100,
     "n_workers": 4,
-    "device": 0,
+    "device": "cuda:0",
     "flag": "ssl_training",
     "save_dir": "checkpoints/ssl_training/",
     "summary_path": "ssl_training/",
