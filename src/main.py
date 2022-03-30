@@ -3,11 +3,12 @@ import json
 import argparse
 import datetime
 import pickle
+from cv2 import transform
 
 import numpy as np
 import torch
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from torchvision import transforms
 from sklearn.model_selection import train_test_split
@@ -17,7 +18,7 @@ from rna_model import *
 from wsi_model import *
 from ssl_training import *
 from read_data import *
-from resnet import resnet50
+from resnet import resnet18
 
 parser = argparse.ArgumentParser(description='SSL training')
 parser.add_argument('--config', type=str, help='JSON config file')
@@ -64,8 +65,8 @@ if 'flag' in config:
 else:
     args.flag = 'train_{date:%Y-%m-%d %H:%M:%S}'.format(date=datetime.datetime.now())
 
-if not os.path.exists(config['save_dir']):
-    os.mkdir(config['save_dir'])
+if not os.path.exists(args.save_dir):
+    os.mkdir(args.save_dir)
 
 path_csv = config['path_csv']
 patch_data_path = config['patch_data_path']
@@ -75,17 +76,21 @@ rna_features = config['rna_features']
 quick = args.quick
 batch_size = args.batch_size
 
-transforms_ = transforms.Compose([
+transforms_train = nn.Sequential(
     transforms.ConvertImageDtype(torch.float),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
     transforms.ColorJitter(64.0 / 255, 0.75, 0.25, 0.04),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
 
-transforms_val = transforms.Compose([
+transforms_val = nn.Sequential(
     transforms.ConvertImageDtype(torch.float),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
 
+transforms_ = {
+    'train': transforms_train,
+    'val': transforms_val
+}
 print('Loading dataset...')
 
 df = pd.read_csv(path_csv)
@@ -109,11 +114,11 @@ test_dataset = PatchRNADataset(patch_data_path, test_df, img_size,
                          transforms=transforms_val, quick=quick)
 
 train_dataloader = DataLoader(train_dataset, batch_size=batch_size, 
-            num_workers=config['n_workers'], pin_memory=True, shuffle=True)
-val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=config['n_workers'],
+            num_workers=4, pin_memory=True, shuffle=True)
+val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=4,
 pin_memory=True, shuffle=False)
 test_dataloader = DataLoader(test_dataset, batch_size=batch_size, 
-num_workers=config['n_workers'], pin_memory=True, shuffle=False)
+num_workers=4, pin_memory=True, shuffle=False)
 
 dataloaders = {
         'train': train_dataloader,
@@ -128,9 +133,10 @@ print('Finished loading dataset and creating dataloader')
 
 print('Initializing models')
 
-wsi_encoder = resnet50(pretrained=True)
+wsi_encoder = resnet18(pretrained=False)
 
-layers_to_train = [wsi_encoder.fc, wsi_encoder.layer4, wsi_encoder.layer3]
+
+layers_to_train = [wsi_encoder.layer4]
 for param in wsi_encoder.parameters():
     param.requires_grad = False
 for layer in layers_to_train:
@@ -138,7 +144,7 @@ for layer in layers_to_train:
         param.requires_grad = True
 
 rna_encoder = RNAEncoder(in_channels=rna_features,
-                         hidden_dims=[6000,2048])
+                         hidden_dims=[6000,512])
 
 model = SSLModel(rna_encoder=rna_encoder,
                     wsi_encoder=wsi_encoder,
@@ -153,13 +159,15 @@ if args.checkpoint is not None:
     model.load_state_dict(torch.load(args.checkpoint))
     print('Loaded model from checkpoint')
 
-
 #model = model.cuda(config['device'])
 model = model.to(config['device'])
 # add optimizer
 lr = args.lr
 
-optimizer = AdamW(model.parameters(), weight_decay = config['weights_decay'], lr=lr)
+optimizer = AdamW([{'params':model.wsi_encoder.parameters(), 'lr': 3e-7},
+                    {'params':model.rna_encoder.parameters(), 'lr': 3e-3},
+                    {'params':model.fc.parameters(), 'lr': 3e-3},
+                    {'params':model.out_layer.parameters(), 'lr': 3e-3}], weight_decay = 0.1)
 
 # add loss function
 criterion = nn.CrossEntropyLoss()
@@ -179,14 +187,15 @@ model, results = train_SSL(model, criterion, optimizer, dataloaders,
               save_dir=args.save_dir,
               device=config['device'], log_interval=config['log_interval'],
               summary_writer=summary_writer,
-              num_epochs=args.num_epochs)
+              num_epochs=args.num_epochs, transforms=transforms_)
 
 torch.save(model.wsi_encoder.state_dict(), os.path.join(args.save_dir, 'wsi_encoder.pt'))
 torch.save(model.rna_encoder.state_dict(), os.path.join(args.save_dir, 'rna_encoder.pt'))
 
 # test on test set
 
-test_predictions = evaluate_SSL(model, test_dataloader, len(test_dataset),device=config['device'])
+test_predictions = evaluate_SSL(model, test_dataloader, len(test_dataset),device=config['device'],
+                                transforms=transforms_val)
 
 with open(args.save_dir+'test_predictions.pkl', 'wb') as f:
     pickle.dump(test_predictions, f)

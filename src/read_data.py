@@ -4,7 +4,6 @@ import pickle
 
 import numpy as np
 from torch.utils.data import Dataset
-from torchvision.io import read_image
 import pandas as pd
 from PIL import Image
 import torch
@@ -353,7 +352,7 @@ class PatchRNADataset(Dataset):
             }
         else:
             out = {
-                'image': self.transforms(image),
+                'image': image,
                 'rna_data': rna_data,
                 'labels': self.labels[idx]
             }
@@ -361,7 +360,7 @@ class PatchRNADataset(Dataset):
         #return read_image(self.images[idx]), self.labels[idx]
 
 class RNADataset(Dataset):
-    def __init__(self, csv_path, quick=False, num_samples=20):
+    def __init__(self, csv_path, quick=False, num_samples=20, le=None, seed=99):
         self.csv_path = csv_path
         self.data = None
         self.quick = quick
@@ -369,6 +368,9 @@ class RNADataset(Dataset):
         self.rna_data = []
         self.vital_status = []
         self.survival_months = []
+        self.le = le
+        self.labels = []
+        self.seed = seed
         self._preprocess()
 
     def _preprocess(self):
@@ -378,9 +380,13 @@ class RNADataset(Dataset):
             csv_file = self.csv_path
         
         if self.quick:
-            csv_file = csv_file.sample(self.num_samples)
+            csv_file = csv_file.sample(self.num_samples, random_state=self.seed)
         
         rna_columns = [x for x in csv_file.columns if 'rna_' in x]
+        if self.le != None:
+            self.labels = csv_file['tcga_project'].values
+            self.labels = self.le.transform(self.labels.reshape(-1,1))
+            self.labels = torch.tensor(self.labels, dtype=torch.int64)
         self.rna_data = csv_file[rna_columns].values.astype(np.float32)
         self.rna_data = torch.tensor(self.rna_data, dtype=torch.float32)
         self.vital_status = csv_file['status'].values.astype(np.float32)
