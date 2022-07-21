@@ -1,6 +1,6 @@
 # Self-supervised multimodal pre-training for lung adenocarcinoma overall survival prediction
 
-**Francisco Carrillo-Perez<sup>1,2,*</sup>, Marija Pizurica<sup>1,3,*</sup>, Ignacio Rojas<sup>1</sup>, Kathleen Marchal<sup>3</sup>, Luis Javier Herrera<sup>2</sup> and Olivier Gevaert<sup>1,4</sup>**
+**Francisco Carrillo-Perez<sup>1,2,x</sup>, Marija Pizurica<sup>1,3,x</sup>, Ignacio Rojas<sup>1</sup>, Kathleen Marchal<sup>3</sup>, Luis Javier Herrera<sup>2</sup> and Olivier Gevaert<sup>1,4</sup>**
 
 **<sup>1</sup> Stanford Center for Biomedical Informatics Research (BMIR), Stanford University, School of Medicine**
 
@@ -10,7 +10,7 @@
 
 **<sup>4</sup> Department of Biomedical Data Science, Stanford University, School of Medicine**
 
-**<sup*</sup> These authors contributed equally**
+**<sup>x</sup> These authors contributed equally**
 
 Presented in the BIOCOMP'22 - The 23rd Int'l Conf on Bioinformatics & Computational Biology, Las Vegas, July 2022.
 
